@@ -17,6 +17,12 @@ web_app = Flask(__name__)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
+def enviar_mensaje_seguro(texto: str, max_length: int = 4000) -> str:
+    """Garantiza que ningún mensaje supere el límite de 4096 caracteres de Telegram."""
+    if len(texto) > max_length:
+        return texto[:max_length] + "\n\n⚠️ *(Resultado recortado por longitud)*"
+    return texto
+
 # -------------------------------------------------------------------
 # COMANDO /start Y /ayuda
 # -------------------------------------------------------------------
@@ -37,16 +43,11 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  `- Donas x2, 1` \n\n"
         "📊 **Reportes Financieros:**\n"
         "• `/ventas_hoy` : Muestra las ventas y recaudación total del día de hoy.\n"
-        "• `/ventas_semana` : Muestra el total de ventas y ganancias de la semana.\n"
         "• `/valorizacion` : Muestra el valor total en dinero del inventario en bodega.\n\n"
         "📦 **Inventario y Mantenimiento:**\n"
-        "• `/stock_bajo` : Alerta sobre productos con inventario crítico o agotándose.\n\n"
-        "💡 **Analítica de Negocio:**\n"
-        "• `/combos` : Muestra cuáles productos se suelen comprar juntos habitualmente.\n"
-        "• `/top_productos` : Muestra el 20% de productos que generan el 80% de ingresos.\n"
-        "• `/clientes` : Segmentación y frecuencia de compra de clientes."
+        "• `/stock_bajo` : Alerta sobre productos con inventario crítico (Top 20).\n"
     )
-    await update.message.reply_text(mensaje, parse_mode="Markdown")
+    await update.message.reply_text(enviar_mensaje_seguro(mensaje), parse_mode="Markdown")
 
 # -------------------------------------------------------------------
 # REGISTRO DE VENTAS (/venta)
@@ -144,13 +145,13 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📦 **Ítems procesados:** {len(productos_matches)}\n"
             f"💰 **Total Venta:** {total_formateado}"
         )
-        await update.message.reply_text(respuesta, parse_mode="Markdown")
+        await update.message.reply_text(enviar_mensaje_seguro(respuesta), parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
 # -------------------------------------------------------------------
-# CONSULTAS Y REPORTES SQL
+# CONSULTAS Y REPORTES SQL PROTEGIDOS
 # -------------------------------------------------------------------
 async def ventas_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = """
@@ -175,7 +176,7 @@ async def ventas_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔢 **Total Transacciones:** {num_ventas}\n"
             f"💰 **Recaudación Total:** {total}"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error en reporte:** {str(e)}")
 
@@ -184,7 +185,8 @@ async def stock_bajo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SELECT nombre, stock_actual 
     FROM productos 
     WHERE stock_actual <= 5 
-    ORDER BY stock_actual ASC;
+    ORDER BY stock_actual ASC
+    LIMIT 20;
     """
     try:
         conn = get_db_connection()
@@ -198,11 +200,12 @@ async def stock_bajo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ **Todo el inventario está en niveles óptimos.**", parse_mode="Markdown")
             return
 
-        lineas = ["⚠️ **Alerta de Stock Bajo (5 o menos unidades):**\n"]
+        lineas = ["⚠️ **Top 20 Productos con Stock Bajo / Agotado:**\n"]
         for nombre, stock in filas:
             lineas.append(f"• **{nombre}**: {stock} unidades restantes")
         
-        await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
+        mensaje_final = "\n".join(lineas)
+        await update.message.reply_text(enviar_mensaje_seguro(mensaje_final), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al consultar stock:** {str(e)}")
 
@@ -227,7 +230,7 @@ async def valorizacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 **Costo Total Invertido:** {costo}\n"
             f"📈 **Valor de Venta estimado:** {venta}"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al calcular valorización:** {str(e)}")
 
@@ -246,7 +249,6 @@ def webhook():
         async def process():
             ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
             
-            # Registro de manejadores de comandos
             ptb_app.add_handler(CommandHandler("start", start))
             ptb_app.add_handler(CommandHandler("ayuda", ayuda))
             ptb_app.add_handler(CommandHandler("venta", registrar_venta))
