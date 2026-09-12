@@ -1,28 +1,20 @@
 import os
 import re
 import logging
-import threading
 import psycopg2
-from flask import Flask
+from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Configuración de logs
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "TU_TOKEN_DE_BOTFATHER_AQUI")
-DATABASE_URL = os.getenv("DATABASE_URL", "TU_CONNECTION_STRING_DE_SUPABASE_AQUI")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Servidor Flask para mantener activo el Web Service gratuito en Render
 web_app = Flask(__name__)
 
-@web_app.route('/')
-def home():
-    return "Bot de Soulcerón activo y funcionando."
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
+# Inicializar aplicación del Bot de Telegram
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -35,13 +27,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/venta\n"
         "Cliente: Nombre Apellido\n"
         "Pago: contado\n"
-        "Productos:\n"
         "- Nombre Producto, 1\n"
         "- Donas x2, 1\n"
-        "```\n\n"
-        "📌 *Notas:*\n"
-        "• Pago solo acepta: `contado` o `credito`.\n"
-        "• Usa una línea por cada producto comenzando con guion (-)."
+        "```"
     )
     await update.message.reply_text(mensaje, parse_mode="Markdown")
 
@@ -54,7 +42,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not cliente_match or not pago_match or not productos_matches:
         await update.message.reply_text(
-            "❌ **Formato incorrecto.** Asegúrate de incluir `Cliente:`, `Pago:` y la lista de `- Producto, Cantidad`."
+            "❌ **Formato incorrecto.** Usa:\n/venta\nCliente: Nombre\nPago: contado\n- Producto, Cantidad"
         )
         return
 
@@ -136,23 +124,32 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🟢 **¡Venta #{id_venta_registrada} Registrada Exitosamente!**\n\n"
             f"👤 **Cliente:** {cliente_nombre}\n"
             f"💳 **Pago:** {tipo_pago.capitalize()}\n"
-            f"📦 **Ítems procesados:** {len(productos_matches)}\n\n"
-            f"✨ *Los triggers actualizaron el stock e inventario automáticamente.*"
+            f"📦 **Ítems procesados:** {len(productos_matches)}"
         )
         await update.message.reply_text(respuesta, parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
+# Handlers del bot
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("venta", registrar_venta))
+app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
+
+# Endpoint para la verificación de Render
+@web_app.route('/', methods=['GET'])
+def home():
+    return "Bot de Soulcerón Webhook Activo."
+
+# Endpoint Webhook para recibir mensajes de Telegram
+@web_app.route('/webhook', methods=['POST'])
+async def webhook():
+    json_str = request.get_data().decode('UTF-8')
+    update = Update.de_json(data=request.get_json(force=True), bot=app.bot)
+    await app.initialize()
+    await app.process_update(update)
+    return 'ok', 200
+
 if __name__ == '__main__':
-    # 1. Iniciar Flask en un hilo independiente
-    threading.Thread(target=run_flask, daemon=True).start()
-
-    # 2. Iniciar el bot de Telegram con polling continuo
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("venta", registrar_venta))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
-
-    print("Bot de Soulcerón desplegado correctamente...")
-    app.run_polling()
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
