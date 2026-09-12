@@ -1,10 +1,9 @@
 import os
 import re
 import logging
-import asyncio
+import threading
 import psycopg2
-from fastapi import FastAPI
-import uvicorn
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -14,12 +13,16 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "TU_TOKEN_DE_BOTFATHER_AQUI")
 DATABASE_URL = os.getenv("DATABASE_URL", "TU_CONNECTION_STRING_DE_SUPABASE_AQUI")
 
-# Servidor Web para cumplir con la Capa Gratuita de Render
-web_app = FastAPI()
+# Servidor Flask para mantener activo el Web Service gratuito en Render
+web_app = Flask(__name__)
 
-@web_app.get("/")
-def health_check():
-    return {"status": "ok", "message": "Bot de Soulcerón activo y escuchando."}
+@web_app.route('/')
+def home():
+    return "Bot de Soulcerón activo y funcionando."
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -141,21 +144,15 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
-async def run_bot():
+if __name__ == '__main__':
+    # 1. Iniciar Flask en un hilo independiente
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # 2. Iniciar el bot de Telegram con polling continuo
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("venta", registrar_venta))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
-    
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
 
-if __name__ == '__main__':
-    # Arrancar el bot de Telegram en segundo plano
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
-    
-    # Arrancar el servidor Web exigido por Render (Plan Gratuito)
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(web_app, host="0.0.0.0", port=port)
+    print("Bot de Soulcerón desplegado correctamente...")
+    app.run_polling()
