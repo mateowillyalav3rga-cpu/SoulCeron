@@ -25,8 +25,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/venta\n"
         "Cliente: Nombre Apellido\n"
         "Pago: contado\n"
-        "- Nombre Producto, 1\n"
-        "- Donas x2, 1\n"
+        "- Pomo, 1\n"
+        "- Pomo x2, 1\n"
         "```"
     )
     await update.message.reply_text(mensaje, parse_mode="Markdown")
@@ -57,28 +57,19 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prod_clean = prod_nombre.strip()
         cant = int(cantidad)
 
-        if "dona" in prod_clean.lower():
-            if "x2" in prod_clean.lower() or "2" in prod_clean:
-                sql_block = f"""
-                SELECT nv.id_venta, p.id_producto, {cant}, 6000.00
-                FROM nueva_venta nv, (
-                    SELECT id_producto FROM productos WHERE LOWER(nombre) LIKE LOWER('%dona%') LIMIT 1
-                ) p
-                """
-            else:
-                sql_block = f"""
-                SELECT nv.id_venta, p.id_producto, {cant}, 3500.00
-                FROM nueva_venta nv, (
-                    SELECT id_producto FROM productos WHERE LOWER(nombre) LIKE LOWER('%dona%') LIMIT 1
-                ) p
-                """
-        else:
-            sql_block = f"""
-            SELECT nv.id_venta, p.id_producto, {cant}, p.precio_venta
-            FROM nueva_venta nv, (
-                SELECT id_producto, precio_venta FROM productos WHERE LOWER(nombre) LIKE LOWER('%{prod_clean}%') LIMIT 1
-            ) p
-            """
+        # Búsqueda inteligente: prioriza coincidencia exacta y ordena por longitud del nombre
+        sql_block = f"""
+        SELECT nv.id_venta, p.id_producto, {cant}, p.precio_venta
+        FROM nueva_venta nv, (
+            SELECT id_producto, precio_venta 
+            FROM productos 
+            WHERE LOWER(nombre) LIKE LOWER('%{prod_clean}%') 
+            ORDER BY 
+                CASE WHEN LOWER(nombre) = LOWER('{prod_clean}') THEN 1 ELSE 2 END,
+                LENGTH(nombre) ASC 
+            LIMIT 1
+        ) p
+        """
         bloques_productos.append(sql_block)
 
     query_productos_sql = "\nUNION ALL\n".join(bloques_productos)
