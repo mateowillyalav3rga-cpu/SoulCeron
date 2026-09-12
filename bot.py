@@ -1,9 +1,8 @@
 import os
 import re
 import logging
-import threading
 import psycopg2
-from flask import Flask
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -14,13 +13,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 web_app = Flask(__name__)
 
-@web_app.route('/', methods=['GET'])
-def home():
-    return "Bot de Soulcerón Activo."
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
+# Aplicación global del bot
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -137,14 +131,25 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("venta", registrar_venta))
+app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
+
+@web_app.route('/', methods=['GET'])
+def home():
+    return "Bot de Soulcerón Webhook Activo."
+
+@web_app.route('/webhook', methods=['POST'])
+async def webhook():
+    if request.method == "POST":
+        json_data = request.get_json(force=True)
+        update = Update.de_json(json_data, app.bot)
+        
+        async with app:
+            await app.process_update(update)
+            
+        return 'ok', 200
+
 if __name__ == '__main__':
-    # Arrancar servidor HTTP para la capa gratuita de Render
-    threading.Thread(target=run_flask, daemon=True).start()
-
-    # Arrancar el bot
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("venta", registrar_venta))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
-
-    app.run_polling(drop_pending_updates=True)
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
