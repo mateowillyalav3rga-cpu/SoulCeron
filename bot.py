@@ -14,8 +14,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 web_app = Flask(__name__)
 
+# Código modificado
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje = (
