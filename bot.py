@@ -3,7 +3,7 @@ import re
 import logging
 import asyncio
 import psycopg2
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -14,7 +14,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 web_app = Flask(__name__)
 
-# Inicializar aplicación del Bot de Telegram
+# Aplicación global del bot
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 def get_db_connection():
@@ -132,27 +132,31 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
-# Registrar Handlers
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("venta", registrar_venta))
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
 
-# Endpoint para la verificación de Render
 @web_app.route('/', methods=['GET'])
 def home():
     return "Bot de Soulcerón Webhook Activo."
 
-# Endpoint Webhook para recibir mensajes de Telegram
 @web_app.route('/webhook', methods=['POST'])
 def webhook():
-    async def process():
-        json_data = request.get_json(force=True)
-        update = Update.de_json(data=json_data, bot=app.bot)
-        await app.initialize()
-        await app.process_update(update)
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), app.bot)
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def process_update():
+            await app.initialize()
+            await app.process_update(update)
+            await app.shutdown()
 
-    asyncio.run(process())
-    return 'ok', 200
+        loop.run_until_complete(process_update())
+        loop.close()
+        
+        return 'ok', 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
