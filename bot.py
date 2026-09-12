@@ -14,7 +14,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 web_app = Flask(__name__)
 
-# Aplicación global del bot
+# Aplicación global del bot (Sin polling)
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 def get_db_connection():
