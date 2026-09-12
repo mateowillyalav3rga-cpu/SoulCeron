@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import asyncio
 import psycopg2
 from flask import Flask, request, jsonify
 from telegram import Update
@@ -131,7 +132,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
-# Handlers del bot
+# Registrar Handlers
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("venta", registrar_venta))
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
@@ -143,11 +144,14 @@ def home():
 
 # Endpoint Webhook para recibir mensajes de Telegram
 @web_app.route('/webhook', methods=['POST'])
-async def webhook():
-    json_str = request.get_data().decode('UTF-8')
-    update = Update.de_json(data=request.get_json(force=True), bot=app.bot)
-    await app.initialize()
-    await app.process_update(update)
+def webhook():
+    async def process():
+        json_data = request.get_json(force=True)
+        update = Update.de_json(data=json_data, bot=app.bot)
+        await app.initialize()
+        await app.process_update(update)
+
+    asyncio.run(process())
     return 'ok', 200
 
 if __name__ == '__main__':
