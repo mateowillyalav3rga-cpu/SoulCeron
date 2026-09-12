@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import asyncio
 import psycopg2
 from flask import Flask, request
 from telegram import Update
@@ -12,9 +13,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 web_app = Flask(__name__)
-
-# Aplicación global del bot
-app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -131,22 +129,31 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("venta", registrar_venta))
-app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
-
 @web_app.route('/', methods=['GET'])
 def home():
     return "Bot de Soulcerón Webhook Activo."
 
 @web_app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     if request.method == "POST":
         json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, app.bot)
         
-        async with app:
-            await app.process_update(update)
+        async def process():
+            ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+            ptb_app.add_handler(CommandHandler("start", start))
+            ptb_app.add_handler(CommandHandler("venta", registrar_venta))
+            ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
+            
+            async with ptb_app:
+                update = Update.de_json(json_data, ptb_app.bot)
+                await ptb_app.process_update(update)
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(process())
+        finally:
+            loop.close()
             
         return 'ok', 200
 
