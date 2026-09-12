@@ -14,7 +14,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 web_app = Flask(__name__)
 
-# Código modificado
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -103,10 +102,15 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         INSERT INTO ventas (id_cliente, tipo_pago)
         SELECT id_cliente, '{tipo_pago}' FROM cliente_final
         RETURNING id_venta
+    ),
+    insertar_detalles AS (
+        INSERT INTO detalle_ventas (id_venta, id_producto, cantidad, precio_unitario)
+        {query_productos_sql}
+        RETURNING id_venta, (cantidad * precio_unitario) AS subtotal
     )
-    INSERT INTO detalle_ventas (id_venta, id_producto, cantidad, precio_unitario)
-    {query_productos_sql}
-    RETURNING id_venta;
+    SELECT id_venta, SUM(subtotal) AS total
+    FROM insertar_detalles
+    GROUP BY id_venta;
     """
 
     try:
@@ -115,15 +119,21 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute(query_completa)
         res = cur.fetchone()
         conn.commit()
+        
         id_venta_registrada = res[0]
+        total_venta = res[1]
+        
         cur.close()
         conn.close()
+
+        total_formateado = f"${total_venta:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
         respuesta = (
             f"🟢 **¡Venta #{id_venta_registrada} Registrada Exitosamente!**\n\n"
             f"👤 **Cliente:** {cliente_nombre}\n"
             f"💳 **Pago:** {tipo_pago.capitalize()}\n"
-            f"📦 **Ítems procesados:** {len(productos_matches)}"
+            f"📦 **Ítems procesados:** {len(productos_matches)}\n"
+            f"💰 **Total Venta:** {total_formateado}"
         )
         await update.message.reply_text(respuesta, parse_mode="Markdown")
 
