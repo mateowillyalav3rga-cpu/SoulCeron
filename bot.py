@@ -14,7 +14,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 web_app = Flask(__name__)
 
-# Aplicación global del bot (Sin polling)
+# Instancia del Bot
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 def get_db_connection():
@@ -143,19 +143,12 @@ def home():
 @web_app.route('/webhook', methods=['POST'])
 def webhook():
     if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), app.bot)
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def process_update():
-            await app.initialize()
-            await app.process_update(update)
-            await app.shutdown()
+        async def main():
+            async with app:
+                update = Update.de_json(request.get_json(force=True), app.bot)
+                await app.process_update(update)
 
-        loop.run_until_complete(process_update())
-        loop.close()
-        
+        asyncio.run(main())
         return 'ok', 200
 
 if __name__ == '__main__':
