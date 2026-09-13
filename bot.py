@@ -19,7 +19,7 @@ from telegram.ext import (
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -49,11 +49,11 @@ def obtener_teclado_menu():
     keyboard = [
         [
             InlineKeyboardButton("📊 Ventas Hoy (Al momento)", callback_data="btn_ventas_hoy"),
-            InlineKeyboardButton("📅 Lo que va de Semana", callback_data="btn_ventas_semana")
+            InlineKeyboardButton("📅 Resumen de la Semana", callback_data="btn_ventas_semana")
         ],
         [
             InlineKeyboardButton("🏢 Valorización Bodega", callback_data="btn_valorizacion"),
-            InlineKeyboardButton("⚠️ Stock Bajo", callback_data="btn_stock_bajo")
+            InlineKeyboardButton("🚫 Productos Agotados", callback_data="btn_stock_bajo")
         ],
         [
             InlineKeyboardButton("📄 Reporte PDF Mes", callback_data="btn_reporte_pdf"),
@@ -89,7 +89,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "```\n\n"
         "🔍 **Consultas Manuales por Comando:**\n"
         "• `/ventas_hoy` : Lo acumulado el día de hoy.\n"
-        "• `/ventas_semana` : Lo acumulado en la semana en curso.\n"
+        "• `/ventas_semana` : Resumen acumulado de la semana en curso.\n"
         "• `/cliente Nombre` : Historial y desglose de un cliente."
     )
     if update.message:
@@ -117,7 +117,11 @@ def ventas_hoy_sync():
 
 def ventas_semana_sync():
     query = """
-    SELECT COUNT(DISTINCT v.id_venta) AS total_ventas, COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado
+    SELECT 
+        COUNT(DISTINCT v.id_venta) AS total_ventas, 
+        COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
     WHERE DATE_TRUNC('week', v.fecha_venta) = DATE_TRUNC('week', CURRENT_DATE);
@@ -128,14 +132,15 @@ def ventas_semana_sync():
     res = cur.fetchone()
     cur.close()
     conn.close()
-    return res[0], res[1]
+    return res[0], res[1], res[2], res[3]
 
 def stock_bajo_sync():
+    # Filtra únicamente productos de Maquillaje (categoría 1) estrictamente en 0 unidades
     query = """
     SELECT nombre, stock_actual 
     FROM productos 
-    WHERE stock_actual <= 5 
-    ORDER BY stock_actual ASC
+    WHERE id_categoria = 1 AND stock_actual = 0 
+    ORDER BY nombre ASC
     LIMIT 20;
     """
     conn = get_db_connection()
@@ -366,8 +371,14 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_ventas_semana":
-        cnt, total = ventas_semana_sync()
-        msg = f"📅 **Lo que va de Semana (Acumulado actual):**\n\n🔢 Transacciones: {cnt}\n💰 Recaudación total: {formatear_cop(total)}"
+        cnt, total, contado, credito = ventas_semana_sync()
+        msg = (
+            f"📅 **Resumen Consolidado de la Semana:**\n\n"
+            f"🔢 **Transacciones Realizadas:** {cnt}\n"
+            f"💵 **Total Contado:** {formatear_cop(contado)}\n"
+            f"💳 **Total Crédito:** {formatear_cop(credito)}\n"
+            f"💰 **RECAUDACIÓN TOTAL:** {formatear_cop(total)}"
+        )
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_valorizacion":
@@ -378,17 +389,22 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "btn_stock_bajo":
         filas = stock_bajo_sync()
         if not filas:
-            await query.message.reply_text("✅ Inventario en niveles óptimos.", reply_markup=obtener_teclado_menu())
+            await query.message.reply_text("✅ No hay productos de Maquillaje totalmente agotados (0 stock).", reply_markup=obtener_teclado_menu())
         else:
-            lineas = ["⚠️ **Productos con Stock Bajo:**\n"]
+            lineas = ["🚫 **Productos de Maquillaje Totalmente Agotados (0 unidades):**\n"]
             for n, s in filas:
                 lineas.append(f"• **{n}**: {s} unidades")
             await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_reporte_pdf":
         await query.message.reply_text("🔄 Generando reporte PDF del mes...")
-        pdf_buffer = generar_pdf_mes_sync()
-        await query.message.reply_document(document=pdf_buffer, filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf")
+        loop = asyncio.get_running_loop()
+        pdf_buffer = await loop.run_in_executor(None, generar_pdf_mes_sync)
+        await query.message.reply_document(
+            document=pdf_buffer, 
+            filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf",
+            caption="📄 Aquí tienes el reporte en PDF del mes."
+        )
 
     elif query.data == "btn_ayuda":
         await ayuda(update, context)
@@ -411,25 +427,8 @@ def tarea_cierre_diario():
         except Exception as e:
             logging.error(f"Error en cierre diario automático: {e}")
 
-def tarea_cierre_semanal():
-    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
-        try:
-            cnt, total = ventas_semana_sync()
-            msg = f"📊 **BALANCE AUTOMÁTICO SEMANAL (DOMINGO 8:00 PM)** 📊\n\n🔢 Total transacciones semana: {cnt}\n💰 Recaudación total semana: {formatear_cop(total)}"
-            
-            async def send():
-                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-                async with ptb_app:
-                    await ptb_app.bot.send_message(chat_id=CHAT_ID_ADMIN, text=msg, parse_mode="Markdown")
-            
-            asyncio.run(send())
-        except Exception as e:
-            logging.error(f"Error en cierre semanal automático: {e}")
-
-# Inicialización de Scheduler en segundo plano (BackgroundScheduler)
 scheduler = BackgroundScheduler()
 scheduler.add_job(tarea_cierre_diario, 'cron', hour=19, minute=0)
-scheduler.add_job(tarea_cierre_semanal, 'cron', day_of_week='sun', hour=20, minute=0)
 scheduler.start()
 
 # -------------------------------------------------------------------
