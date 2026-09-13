@@ -96,7 +96,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text(mensaje, reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
 # -------------------------------------------------------------------
-# LÓGICA DE CONSULTAS SQL
+# LÓGICA DE CONSULTAS SQL CON pr.nombre_empresa
 # -------------------------------------------------------------------
 def ventas_hoy_sync():
     query = """
@@ -156,7 +156,7 @@ def ventas_semana_sync():
 
 def stock_bajo_sync():
     query = """
-    SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre, 'Sin Proveedor') AS proveedor
+    SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre_empresa, 'Sin Proveedor') AS proveedor
     FROM productos p
     LEFT JOIN proveedores pr ON p.id_proveedor = pr.id_proveedor
     WHERE p.stock_actual = 0 
@@ -185,7 +185,7 @@ def valorizacion_sync():
 
 def inventario_completo_sync():
     query = """
-    SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre, 'Sin Proveedor') AS proveedor
+    SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre_empresa, 'Sin Proveedor') AS proveedor
     FROM productos p
     LEFT JOIN proveedores pr ON p.id_proveedor = pr.id_proveedor
     ORDER BY p.nombre ASC;
@@ -696,7 +696,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🏢 **Valorización de Bodega**\n\n"
                     f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
                     f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`\n\n"
-                    f"📄 *Adjunto encontrarás el reporte PDF completo del inventario.*"
+                    f"📄 *Adjunto encontrarás el reporte PDF completo del inventario y sus proveedores.*"
                 )
                 pdf_buffer = generar_pdf_valorizacion_sync()
                 await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
@@ -710,11 +710,11 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data == "btn_stock_bajo":
             filas = stock_bajo_sync()
             if not filas:
-                await query.message.reply_text("✅ **No se encontraron productos de Maquillaje agotados. ¡Tu stock está al día!**", reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+                await query.message.reply_text("✅ **No se encontraron productos agotados. ¡Tu stock está al día!**", reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
             else:
                 lineas = [
                     "🚫 **Productos Totalmente Agotados (0 uds.)**\n",
-                    "📄 *Adjunto encontrarás el reporte PDF con la lista completa.*"
+                    "📄 *Adjunto encontrarás el reporte PDF con la lista completa y sus proveedores.*"
                 ]
                 for n, s, c, p, prov in filas:
                     lineas.append(f"• **{n}** _({prov})_")
