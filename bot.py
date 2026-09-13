@@ -156,11 +156,11 @@ def ventas_semana_sync():
 
 def stock_bajo_sync():
     query = """
-    SELECT nombre, stock_actual 
-    FROM productos 
-    WHERE id_categoria = 1 AND stock_actual = 0 
-    ORDER BY nombre ASC
-    LIMIT 20;
+    SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre, 'Sin Proveedor') AS proveedor
+    FROM productos p
+    LEFT JOIN proveedores pr ON p.id_proveedor = pr.id_proveedor
+    WHERE p.stock_actual = 0 
+    ORDER BY p.nombre ASC;
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -182,6 +182,21 @@ def valorizacion_sync():
     cur.close()
     conn.close()
     return res[0] or 0, res[1] or 0
+
+def inventario_completo_sync():
+    query = """
+    SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre, 'Sin Proveedor') AS proveedor
+    FROM productos p
+    LEFT JOIN proveedores pr ON p.id_proveedor = pr.id_proveedor
+    ORDER BY p.nombre ASC;
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(query)
+    filas = cur.fetchall()
+    cur.close()
+    conn.close()
+    return filas
 
 # -------------------------------------------------------------------
 # CONSULTA DE CLIENTE (/cliente)
@@ -400,7 +415,7 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **Error al registrar compra:** {str(e)}")
 
 # -------------------------------------------------------------------
-# GENERADORES DE PDF (MENSUAL Y SEMANAL)
+# GENERADORES DE PDF (MENSUAL, SEMANAL, BODEGA Y AGOTADOS)
 # -------------------------------------------------------------------
 def generar_pdf_mes_sync(mes_offset=0):
     query = """
@@ -525,6 +540,94 @@ def generar_pdf_semana_sync():
     buffer.seek(0)
     return buffer
 
+def generar_pdf_valorizacion_sync():
+    productos = inventario_completo_sync()
+    if not productos:
+        return None
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    styles = getSampleStyleSheet()
+
+    titulo_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, textColor=colors.HexColor('#880E4F'), spaceAfter=8)
+    sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.gray, spaceAfter=15)
+
+    elements = [
+        Paragraph("Soulcerón - Valorización Completa de Bodega", titulo_style),
+        Paragraph(f"Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
+    ]
+
+    tabla_data = [["Producto", "Stock", "Costo U.", "Precio Venta", "Proveedor"]]
+    
+    for nombre, stock, costo, precio, proveedor in productos:
+        tabla_data.append([
+            str(nombre),
+            str(stock),
+            formatear_cop(costo),
+            formatear_cop(precio),
+            str(proveedor)
+        ])
+
+    t = Table(tabla_data, colWidths=[185, 45, 85, 85, 150])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F8BBD0')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#880E4F')),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E0E0E0')),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#F5F5F5')),
+    ]))
+
+    elements.append(t)
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+def generar_pdf_agotados_sync():
+    agotados = stock_bajo_sync()
+    if not agotados:
+        return None
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    styles = getSampleStyleSheet()
+
+    titulo_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, textColor=colors.HexColor('#D81B60'), spaceAfter=8)
+    sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.gray, spaceAfter=15)
+
+    elements = [
+        Paragraph("Soulcerón - Reporte de Productos Agotados", titulo_style),
+        Paragraph(f"Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
+    ]
+
+    tabla_data = [["Producto", "Stock", "Costo U.", "Precio Venta", "Proveedor"]]
+    
+    for nombre, stock, costo, precio, proveedor in agotados:
+        tabla_data.append([
+            str(nombre),
+            str(stock),
+            formatear_cop(costo),
+            formatear_cop(precio),
+            str(proveedor)
+        ])
+
+    t = Table(tabla_data, colWidths=[185, 45, 85, 85, 150])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F8BBD0')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#880E4F')),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E0E0E0')),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#F5F5F5')),
+    ]))
+
+    elements.append(t)
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
 # -------------------------------------------------------------------
 # HANDLER DE BOTONES (CALLBACK QUERY)
 # -------------------------------------------------------------------
@@ -587,23 +690,43 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             costo, venta = valorizacion_sync()
             if costo == 0 and venta == 0:
                 msg = "ℹ️ **No se encontraron productos registrados en inventario para calcular la valorización.**"
+                await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
             else:
                 msg = (
                     f"🏢 **Valorización de Bodega**\n\n"
                     f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
-                    f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`"
+                    f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`\n\n"
+                    f"📄 *Adjunto encontrarás el reporte PDF completo del inventario.*"
                 )
-            await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+                pdf_buffer = generar_pdf_valorizacion_sync()
+                await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+                if pdf_buffer:
+                    pdf_buffer.seek(0)
+                    await query.message.reply_document(
+                        document=pdf_buffer,
+                        filename=f"Valorizacion_Bodega_{datetime.now().strftime('%d_%m_%Y')}.pdf"
+                    )
 
         elif query.data == "btn_stock_bajo":
             filas = stock_bajo_sync()
             if not filas:
                 await query.message.reply_text("✅ **No se encontraron productos de Maquillaje agotados. ¡Tu stock está al día!**", reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
             else:
-                lineas = ["🚫 **Productos de Maquillaje Agotados (0 uds.)**\n"]
-                for n, s in filas:
-                    lineas.append(f"• **{n}**")
+                lineas = [
+                    "🚫 **Productos Totalmente Agotados (0 uds.)**\n",
+                    "📄 *Adjunto encontrarás el reporte PDF con la lista completa.*"
+                ]
+                for n, s, c, p, prov in filas:
+                    lineas.append(f"• **{n}** _({prov})_")
+                
+                pdf_buffer = generar_pdf_agotados_sync()
                 await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+                if pdf_buffer:
+                    pdf_buffer.seek(0)
+                    await query.message.reply_document(
+                        document=pdf_buffer,
+                        filename=f"Productos_Agotados_{datetime.now().strftime('%d_%m_%Y')}.pdf"
+                    )
 
         elif query.data == "btn_reporte_pdf":
             pdf_buffer = generar_pdf_mes_sync(mes_offset=0)
