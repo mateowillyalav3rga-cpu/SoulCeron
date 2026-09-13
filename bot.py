@@ -97,7 +97,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text(mensaje, reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
 # -------------------------------------------------------------------
-# LÓGICA DE CONSULTAS SQL (EJECUCIÓN ASÍNCRONA VIA TO_THREAD)
+# LÓGICA DE CONSULTAS SQL
 # -------------------------------------------------------------------
 def ventas_hoy_sync():
     query = """
@@ -347,6 +347,9 @@ def generar_pdf_mes_sync():
     cur.close()
     conn.close()
 
+    if not ventas:
+        return None
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     styles = getSampleStyleSheet()
@@ -393,23 +396,26 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "btn_ventas_hoy":
         cnt, total = await asyncio.to_thread(ventas_hoy_sync)
-        msg = (
-            f"📊 **Ventas del Día de Hoy**\n\n"
-            f"🔢 **Transacciones:** {cnt}\n"
-            f"💰 **Total Recaudado:** `{formatear_cop(total)}`"
-        )
+        if cnt == 0:
+            msg = "ℹ️ **No se encontraron ventas registradas en el día de hoy.**"
+        else:
+            msg = (
+                f"📊 **Ventas del Día de Hoy**\n\n"
+                f"🔢 **Transacciones:** {cnt}\n"
+                f"💰 **Total Recaudado:** `{formatear_cop(total)}`"
+            )
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_ventas_semana":
         dias, totales = await asyncio.to_thread(ventas_semana_sync)
-        cnt, total, contado, credito, ganancia = totales
         
-        mensaje = ["📅 **Balance de la Semana**\n"]
-        mensaje.append("📆 **Desglose Diario:**\n")
-        
-        if not dias:
-            mensaje.append("• *No hay ventas registradas en esta semana.*")
+        if not totales or totales[0] == 0:
+            msg_final = "ℹ️ **No se encontraron ventas registradas en lo que va de esta semana.**"
         else:
+            cnt, total, contado, credito, ganancia = totales
+            mensaje = ["📅 **Balance de la Semana**\n"]
+            mensaje.append("📆 **Desglose Diario:**\n")
+            
             for fecha, dia_nombre, total_dia, contado_dia, credito_dia in dias:
                 dia_clean = dia_nombre.strip().capitalize()
                 fecha_str = fecha.strftime('%d/%m')
@@ -417,30 +423,33 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🔹 **{dia_clean}** ({fecha_str})\n"
                     f"   └ Total: `{formatear_cop(total_dia)}`  *(💵 `{formatear_cop(contado_dia)}` | 💳 `{formatear_cop(credito_dia)}`)*\n"
                 )
-        
-        mensaje.append("\n📊 **Resumen General:**\n")
-        mensaje.append(f"🔢 **Transacciones:** {cnt}")
-        mensaje.append(f"💵 **Total Contado:** `{formatear_cop(contado)}`")
-        mensaje.append(f"💳 **Total Crédito:** `{formatear_cop(credito)}`")
-        mensaje.append(f"💰 **Recaudación Total:** `{formatear_cop(total)}`")
-        mensaje.append(f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`")
+            
+            mensaje.append("\n📊 **Resumen General:**\n")
+            mensaje.append(f"🔢 **Transacciones:** {cnt}")
+            mensaje.append(f"💵 **Total Contado:** `{formatear_cop(contado)}`")
+            mensaje.append(f"💳 **Total Crédito:** `{formatear_cop(credito)}`")
+            mensaje.append(f"💰 **Recaudación Total:** `{formatear_cop(total)}`")
+            mensaje.append(f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`")
 
-        msg_final = "\n".join(mensaje)
+            msg_final = "\n".join(mensaje)
         await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_valorizacion":
         costo, venta = await asyncio.to_thread(valorizacion_sync)
-        msg = (
-            f"🏢 **Valorización de Bodega**\n\n"
-            f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
-            f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`"
-        )
+        if costo == 0 and venta == 0:
+            msg = "ℹ️ **No se encontraron productos registrados en inventario para calcular la valorización.**"
+        else:
+            msg = (
+                f"🏢 **Valorización de Bodega**\n\n"
+                f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
+                f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`"
+            )
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_stock_bajo":
         filas = await asyncio.to_thread(stock_bajo_sync)
         if not filas:
-            await query.message.reply_text("✅ ¡Excelente! No hay productos de Maquillaje totalmente agotados.", reply_markup=obtener_teclado_menu())
+            await query.message.reply_text("✅ **No se encontraron productos de Maquillaje agotados. ¡Tu stock está al día!**", reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
         else:
             lineas = ["🚫 **Productos de Maquillaje Agotados (0 uds.)**\n"]
             for n, s in filas:
@@ -448,16 +457,20 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_reporte_pdf":
-        msg_espera = await query.message.reply_text("🔄 Generando reporte PDF del mes...")
+        msg_espera = await query.message.reply_text("🔄 Consultando base de datos...")
         pdf_buffer = await asyncio.to_thread(generar_pdf_mes_sync)
         
-        await context.bot.send_document(
-            chat_id=query.message.chat_id,
-            document=pdf_buffer, 
-            filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf",
-            caption="📄 Aquí tienes tu reporte PDF del mes listo para consultar."
-        )
-        await msg_espera.delete()
+        if pdf_buffer is None:
+            await msg_espera.edit_text("ℹ️ **No se encontraron ventas registradas durante este mes para generar el PDF.**", parse_mode="Markdown")
+        else:
+            await msg_espera.edit_text("🔄 Generando reporte PDF del mes...")
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=pdf_buffer, 
+                filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf",
+                caption="📄 Aquí tienes tu reporte PDF del mes listo para consultar."
+            )
+            await msg_espera.delete()
 
     elif query.data == "btn_ayuda":
         await ayuda(update, context)
