@@ -3,7 +3,7 @@ import re
 import io
 import logging
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,7 +18,7 @@ from telegram.ext import (
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -219,7 +219,6 @@ async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         nombre_cl, compras, contado, credito, categoria, ult_compra, dias_sin = res
-
         ult_compra_str = ult_compra.strftime('%d/%m/%Y') if ult_compra else "Sin compras previas"
         dias_str = f"{int(dias_sin)} días" if dias_sin is not None else "N/A"
 
@@ -237,11 +236,10 @@ async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **Error al consultar cliente:** {str(e)}")
 
 # -------------------------------------------------------------------
-# REGISTRO DE VENTAS (/venta)
+# REGISTRO DE VENTAS Y COMPRAS
 # -------------------------------------------------------------------
 async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
-
     cliente_match = re.search(r"Cliente:\s*(.+)", texto, re.IGNORECASE)
     pago_match = re.search(r"Pago:\s*(.+)", texto, re.IGNORECASE)
     productos_matches = re.findall(r"-\s*(.+?),\s*(\d+)", texto)
@@ -350,9 +348,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
-# -------------------------------------------------------------------
-# REGISTRO DE COMPRAS (/compra)
-# -------------------------------------------------------------------
 async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     items = re.findall(r"-\s*(.+?),\s*(\d+),\s*(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)", texto)
@@ -405,21 +400,22 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **Error al registrar compra:** {str(e)}")
 
 # -------------------------------------------------------------------
-# GENERADOR DE PDF MENSUAL
+# GENERADORES DE PDF (MENSUAL Y SEMANAL)
 # -------------------------------------------------------------------
-def generar_pdf_mes_sync():
+def generar_pdf_mes_sync(mes_offset=0):
+    # mes_offset=0 es el mes actual. mes_offset=1 (o -1) permite calcular el mes anterior
     query = """
     SELECT v.id_venta, v.fecha, c.nombre AS cliente, v.tipo_pago, SUM(dv.cantidad * dv.precio_unitario) AS total
     FROM ventas v
     JOIN clientes c ON v.id_cliente = c.id_cliente
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE DATE_TRUNC('month', v.fecha) = DATE_TRUNC('month', CURRENT_DATE)
+    WHERE DATE_TRUNC('month', v.fecha) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '%s month')
     GROUP BY v.id_venta, v.fecha, c.nombre, v.tipo_pago
     ORDER BY v.fecha ASC;
     """
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(query)
+    cur.execute(query % mes_offset)
     ventas = cur.fetchall()
     cur.close()
     conn.close()
@@ -454,6 +450,72 @@ def generar_pdf_mes_sync():
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#880E4F')),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E0E0E0')),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#F5F5F5')),
+    ]))
+
+    elements.append(t)
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+def generar_pdf_semana_sync():
+    query = """
+    SELECT v.id_venta, v.fecha, c.nombre AS cliente, v.tipo_pago, p.nombre AS producto, dv.cantidad, dv.precio_unitario, (dv.cantidad * dv.precio_unitario) AS subtotal
+    FROM ventas v
+    JOIN clientes c ON v.id_cliente = c.id_cliente
+    JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
+    JOIN productos p ON dv.id_producto = p.id_producto
+    WHERE DATE_TRUNC('week', v.fecha) = DATE_TRUNC('week', CURRENT_DATE)
+    ORDER BY v.fecha ASC;
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(query)
+    detalles = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not detalles:
+        return None
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    styles = getSampleStyleSheet()
+
+    titulo_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, textColor=colors.HexColor('#880E4F'), spaceAfter=8)
+    sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.gray, spaceAfter=15)
+
+    elements = [
+        Paragraph("Soulcerón - Balance Semanal Detallado", titulo_style),
+        Paragraph(f"Semana en curso - Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
+    ]
+
+    tabla_data = [["ID", "Fecha", "Cliente", "Pago", "Producto", "Cant", "Subtotal"]]
+    grand_total = 0
+
+    for id_v, fecha, cl, pago, prod, cant, precio, subtotal in detalles:
+        grand_total += subtotal
+        tabla_data.append([
+            str(id_v), 
+            fecha.strftime('%d/%m'), 
+            str(cl), 
+            str(pago).capitalize(), 
+            str(prod), 
+            str(cant), 
+            formatear_cop(subtotal)
+        ])
+
+    tabla_data.append(["", "", "", "", "", "TOTAL:", formatear_cop(grand_total)])
+
+    t = Table(tabla_data, colWidths=[35, 55, 120, 60, 150, 35, 85])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F8BBD0')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#880E4F')),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E0E0E0')),
         ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
         ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#F5F5F5')),
@@ -535,15 +597,15 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
         elif query.data == "btn_reporte_pdf":
-            pdf_buffer = generar_pdf_mes_sync()
+            pdf_buffer = generar_pdf_mes_sync(mes_offset=0)
             
             if pdf_buffer is None:
                 await query.message.reply_text("ℹ️ **No se encontraron ventas registradas durante este mes para generar el PDF.**", parse_mode="Markdown")
             else:
                 await query.message.reply_document(
                     document=pdf_buffer, 
-                    filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf",
-                    caption="📄 Aquí tienes tu reporte PDF del mes listo para consultar."
+                    filename=f"Reporte_Mes_{datetime.now().strftime('%m_%Y')}.pdf",
+                    caption="📄 Aquí tienes tu reporte PDF del mes en curso."
                 )
 
         elif query.data == "btn_ayuda":
@@ -593,9 +655,11 @@ def tarea_cierre_semanal():
                 f"💵 **Total Contado:** `{formatear_cop(contado)}`\n"
                 f"💳 **Total Crédito:** `{formatear_cop(credito)}`\n"
                 f"💰 **Recaudación Total:** `{formatear_cop(total)}`\n"
-                f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`"
+                f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`\n\n"
+                f"📄 *Adjunto encontrarás el reporte PDF detallado de la semana.*"
             )
-            
+            pdf_buffer = generar_pdf_semana_sync()
+
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 async with ptb_app:
@@ -603,6 +667,13 @@ def tarea_cierre_semanal():
                     for admin_id in admins:
                         try:
                             await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                            if pdf_buffer:
+                                pdf_buffer.seek(0)
+                                await ptb_app.bot.send_document(
+                                    chat_id=admin_id,
+                                    document=pdf_buffer,
+                                    filename=f"Reporte_Semanal_{datetime.now().strftime('%d_%m_%Y')}.pdf"
+                                )
                         except Exception as ex:
                             logging.error(f"Error enviando a admin {admin_id}: {ex}")
             
@@ -611,11 +682,44 @@ def tarea_cierre_semanal():
         except Exception as e:
             logging.error(f"Error en cierre semanal automático: {e}")
 
+def tarea_cierre_mensual_automatico():
+    # Se ejecuta el día 1 de cada mes a las 8:00 AM y genera el reporte del mes anterior (offset=1)
+    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
+        try:
+            pdf_buffer = generar_pdf_mes_sync(mes_offset=1)
+            msg = "📈 **REPORTE AUTOMÁTICO MENSUAL** 📈\n\n📄 Adjunto encontrarás el PDF consolidado con todas las ventas del mes anterior."
+
+            async def send():
+                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+                async with ptb_app:
+                    admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
+                    for admin_id in admins:
+                        try:
+                            await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                            if pdf_buffer:
+                                pdf_buffer.seek(0)
+                                await ptb_app.bot.send_document(
+                                    chat_id=admin_id,
+                                    document=pdf_buffer,
+                                    filename=f"Reporte_Mensual_Anterior_{datetime.now().strftime('%m_%Y')}.pdf"
+                                )
+                            else:
+                                await ptb_app.bot.send_message(chat_id=admin_id, text="ℹ️ *No se registraron ventas en el mes anterior.*", parse_mode="Markdown")
+                        except Exception as ex:
+                            logging.error(f"Error enviando reporte mensual a {admin_id}: {ex}")
+
+            import asyncio
+            asyncio.run(send())
+        except Exception as e:
+            logging.error(f"Error en reporte mensual automático: {e}")
+
 scheduler = BackgroundScheduler()
 # Cierre Diario a las 7:00 PM (19:00 hrs)
 scheduler.add_job(tarea_cierre_diario, 'cron', hour=19, minute=0)
 # Cierre Semanal todos los domingos a las 8:00 PM (20:00 hrs)
 scheduler.add_job(tarea_cierre_semanal, 'cron', day_of_week='sun', hour=20, minute=0)
+# Cierre Mensual automático el día 1 de cada mes a las 8:00 AM
+scheduler.add_job(tarea_cierre_mensual_automatico, 'cron', day=1, hour=8, minute=0)
 scheduler.start()
 
 # -------------------------------------------------------------------
