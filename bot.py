@@ -19,7 +19,7 @@ from telegram.ext import (
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -48,8 +48,8 @@ def formatear_cop(monto):
 def obtener_teclado_menu():
     keyboard = [
         [
-            InlineKeyboardButton("📊 Ventas Hoy (Al momento)", callback_data="btn_ventas_hoy"),
-            InlineKeyboardButton("📅 Resumen de la Semana", callback_data="btn_ventas_semana")
+            InlineKeyboardButton("📊 Ventas Hoy", callback_data="btn_ventas_hoy"),
+            InlineKeyboardButton("📅 Balance Semanal", callback_data="btn_ventas_semana")
         ],
         [
             InlineKeyboardButton("🏢 Valorización Bodega", callback_data="btn_valorizacion"),
@@ -64,8 +64,9 @@ def obtener_teclado_menu():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "✨ **¡Bienvenido al Bot de Gestión de Soulcerón!** ✨\n\n"
-        "Consulta en tiempo real con los botones o registra ventas y compras enviando sus comandos."
+        "✨ **¡Hola! Bienvenido al asistente de Soulcerón** ✨\n\n"
+        "Estoy listo para ayudarte a gestionar tus ventas, inventario y finanzas.\n\n"
+        "👇 *Selecciona una opción del menú para comenzar:*"
     )
     if update.message:
         await update.message.reply_text(msg, reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
@@ -74,23 +75,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje = (
-        "🤖 **Formatos de Registro y Consultas Manuales - Soulcerón**\n\n"
+        "🤖 **Formatos de Registro y Consultas**\n"
+        "───────────────────────────────\n\n"
         "📝 **Registrar Venta:**\n"
-        "```\n"
+        "```text\n"
         "/venta\n"
         "Cliente: Nombre Apellido\n"
         "Pago: contado\n"
         "- Pomo, 1\n"
         "```\n\n"
         "📦 **Registrar Compra / Reabastecimiento:**\n"
-        "```\n"
+        "```text\n"
         "/compra\n"
         "- Pomo, 50, 1300, 3000\n"
         "```\n\n"
-        "🔍 **Consultas Manuales por Comando:**\n"
-        "• `/ventas_hoy` : Lo acumulado el día de hoy.\n"
-        "• `/ventas_semana` : Resumen acumulado de la semana en curso.\n"
-        "• `/cliente Nombre` : Historial y desglose de un cliente."
+        "🔍 **Consultar Cliente:**\n"
+        "`/cliente Nombre`"
     )
     if update.message:
         await update.message.reply_text(mensaje, reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
@@ -116,26 +116,47 @@ def ventas_hoy_sync():
     return res[0], res[1]
 
 def ventas_semana_sync():
-    query = """
+    query_dias = """
     SELECT 
-        COUNT(DISTINCT v.id_venta) AS total_ventas, 
-        COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado,
-        COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
-        COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito
+        DATE(v.fecha_venta) AS fecha,
+        TO_CHAR(v.fecha_venta, 'TMDay') AS dia_nombre,
+        COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_dia,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS contado_dia,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS credito_dia
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
+    WHERE DATE_TRUNC('week', v.fecha_venta) = DATE_TRUNC('week', CURRENT_DATE)
+    GROUP BY DATE(v.fecha_venta), TO_CHAR(v.fecha_venta, 'TMDay')
+    ORDER BY fecha ASC;
+    """
+    
+    query_totales = """
+    SELECT 
+        COUNT(DISTINCT v.id_venta) AS total_ventas,
+        COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito,
+        COALESCE(SUM(dv.cantidad * (dv.precio_unitario - p.costo_compra)), 0) AS ganancia_total
+    FROM ventas v
+    JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
+    JOIN productos p ON dv.id_producto = p.id_producto
     WHERE DATE_TRUNC('week', v.fecha_venta) = DATE_TRUNC('week', CURRENT_DATE);
     """
+    
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(query)
-    res = cur.fetchone()
+    cur.execute(query_dias)
+    dias = cur.fetchall()
+    
+    cur.execute(query_totales)
+    totales = cur.fetchone()
+    
     cur.close()
     conn.close()
-    return res[0], res[1], res[2], res[3]
+    
+    return dias, totales
 
 def stock_bajo_sync():
-    # Filtra únicamente productos de Maquillaje (categoría 1) estrictamente en 0 unidades
     query = """
     SELECT nombre, stock_actual 
     FROM productos 
@@ -247,11 +268,12 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         respuesta = (
-            f"🟢 **¡Venta #{id_venta_registrada} Registrada Exitosamente!**\n\n"
+            f"🎉 **¡Venta #{id_venta_registrada} Registrada!** 🎉\n"
+            f"───────────────────────────────\n\n"
             f"👤 **Cliente:** {cliente_nombre}\n"
-            f"💳 **Pago:** {tipo_pago.capitalize()}\n"
-            f"📦 **Ítems procesados:** {len(productos_matches)}\n"
-            f"💰 **Total Venta:** {formatear_cop(total_venta)}"
+            f"💳 **Método de Pago:** {tipo_pago.capitalize()}\n"
+            f"📦 **Ítems vendidos:** {len(productos_matches)}\n\n"
+            f"💰 **Total Cobrado:** `{formatear_cop(total_venta)}`"
         )
         await update.message.reply_text(enviar_mensaje_seguro(respuesta), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
     except Exception as e:
@@ -288,15 +310,18 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = cur.fetchone()
 
             if res:
-                resúmenes.append(f"• **{res[0]}**: +{cant} unidades (Nuevo Stock: {res[1]})")
+                resúmenes.append(f"• **{res[0]}**: +{cant} uds. (Nuevo Stock: `{res[1]}`)")
             else:
-                resúmenes.append(f"⚠️ **{prod_clean}**: No encontrado en base de datos.")
+                resúmenes.append(f"⚠️ **{prod_clean}**: No encontrado en la base de datos.")
 
         conn.commit()
         cur.close()
         conn.close()
 
-        msg = "📦 **Reabastecimiento Registrado:**\n\n" + "\n".join(resúmenes)
+        msg = (
+            f"📦 **Reabastecimiento de Inventario**\n"
+            f"───────────────────────────────\n\n" + "\n\n".join(resúmenes)
+        )
         await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar compra:** {str(e)}")
@@ -367,33 +392,66 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "btn_ventas_hoy":
         cnt, total = ventas_hoy_sync()
-        msg = f"📊 **Ventas de Hoy (Acumulado en tiempo real):**\n\n🔢 Transacciones: {cnt}\n💰 Recaudado: {formatear_cop(total)}"
-        await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
-
-    elif query.data == "btn_ventas_semana":
-        cnt, total, contado, credito = ventas_semana_sync()
         msg = (
-            f"📅 **Resumen Consolidado de la Semana:**\n\n"
-            f"🔢 **Transacciones Realizadas:** {cnt}\n"
-            f"💵 **Total Contado:** {formatear_cop(contado)}\n"
-            f"💳 **Total Crédito:** {formatear_cop(credito)}\n"
-            f"💰 **RECAUDACIÓN TOTAL:** {formatear_cop(total)}"
+            f"📊 **Ventas del Día de Hoy**\n"
+            f"───────────────────────────────\n\n"
+            f"🔢 **Transacciones:** {cnt}\n"
+            f"💰 **Total Recaudado:** `{formatear_cop(total)}`"
         )
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
+    elif query.data == "btn_ventas_semana":
+        dias, totales = ventas_semana_sync()
+        cnt, total, contado, credito, ganancia = totales
+        
+        mensaje = []
+        mensaje.append("📅 **Balance de la Semana**")
+        mensaje.append("───────────────────────────────\n")
+        mensaje.append("📆 **Desglose Diario:**\n")
+        
+        if not dias:
+            mensaje.append("• *No hay ventas registradas en esta semana.*")
+        else:
+            for fecha, dia_nombre, total_dia, contado_dia, credito_dia in dias:
+                dia_clean = dia_nombre.strip().capitalize()
+                fecha_str = fecha.strftime('%d/%m')
+                mensaje.append(
+                    f"🔹 **{dia_clean}** ({fecha_str})\n"
+                    f"   └ Total: `{formatear_cop(total_dia)}`  *(💵 `{formatear_cop(contado_dia)}` | 💳 `{formatear_cop(credito_dia)}`)*\n"
+                )
+        
+        mensaje.append("───────────────────────────────")
+        mensaje.append("📊 **Resumen General de la Semana:**\n")
+        mensaje.append(f"🔢 **Transacciones:** {cnt}")
+        mensaje.append(f"💵 **Total Contado:** `{formatear_cop(contado)}`")
+        mensaje.append(f"💳 **Total Crédito:** `{formatear_cop(credito)}`")
+        mensaje.append(f"💰 **Recaudación Total:** `{formatear_cop(total)}`\n")
+        mensaje.append(f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`")
+
+        msg_final = "\n".join(mensaje)
+        await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+
     elif query.data == "btn_valorizacion":
         costo, venta = valorizacion_sync()
-        msg = f"🏢 **Valorización de Bodega:**\n\n💵 Invertido: {formatear_cop(costo)}\n📈 Valor Venta: {formatear_cop(venta)}"
+        msg = (
+            f"🏢 **Valorización de Bodega**\n"
+            f"───────────────────────────────\n\n"
+            f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
+            f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`"
+        )
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_stock_bajo":
         filas = stock_bajo_sync()
         if not filas:
-            await query.message.reply_text("✅ No hay productos de Maquillaje totalmente agotados (0 stock).", reply_markup=obtener_teclado_menu())
+            await query.message.reply_text("✅ ¡Excelente! No hay productos de Maquillaje totalmente agotados.", reply_markup=obtener_teclado_menu())
         else:
-            lineas = ["🚫 **Productos de Maquillaje Totalmente Agotados (0 unidades):**\n"]
+            lineas = [
+                "🚫 **Productos de Maquillaje Agotados (0 uds.)**",
+                "───────────────────────────────\n"
+            ]
             for n, s in filas:
-                lineas.append(f"• **{n}**: {s} unidades")
+                lineas.append(f"• **{n}**")
             await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_reporte_pdf":
@@ -403,7 +461,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_document(
             document=pdf_buffer, 
             filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf",
-            caption="📄 Aquí tienes el reporte en PDF del mes."
+            caption="📄 Aquí tienes tu reporte PDF listo para consultar."
         )
 
     elif query.data == "btn_ayuda":
@@ -416,7 +474,12 @@ def tarea_cierre_diario():
     if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
         try:
             cnt, total = ventas_hoy_sync()
-            msg = f"🔔 **CIERRE AUTOMÁTICO DEL DÍA (7:00 PM)** 🔔\n\n🔢 Ventas realizadas hoy: {cnt}\n💰 Total recaudado hoy: {formatear_cop(total)}"
+            msg = (
+                f"🔔 **Cierre de Caja Automático (7:00 PM)** 🔔\n"
+                f"───────────────────────────────\n\n"
+                f"🔢 **Ventas realizadas hoy:** {cnt}\n"
+                f"💰 **Total recaudado:** `{formatear_cop(total)}`"
+            )
             
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
