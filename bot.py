@@ -17,9 +17,9 @@ from telegram.ext import (
     ContextTypes
 )
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -43,7 +43,7 @@ def formatear_cop(monto):
     return f"${monto:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
 # -------------------------------------------------------------------
-# MENÚ CON BOTONES INTERACTIVOS (BÚSQUEDA MANUAL)
+# MENÚ CON BOTONES INTERACTIVOS
 # -------------------------------------------------------------------
 def obtener_teclado_menu():
     keyboard = [
@@ -100,7 +100,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------------------------------------------------
 # LÓGICA DE CONSULTAS SQL
 # -------------------------------------------------------------------
-async def ventas_hoy_logic():
+def ventas_hoy_sync():
     query = """
     SELECT COUNT(DISTINCT v.id_venta) AS total_ventas, COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado
     FROM ventas v
@@ -115,7 +115,7 @@ async def ventas_hoy_logic():
     conn.close()
     return res[0], res[1]
 
-async def ventas_semana_logic():
+def ventas_semana_sync():
     query = """
     SELECT COUNT(DISTINCT v.id_venta) AS total_ventas, COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado
     FROM ventas v
@@ -130,7 +130,7 @@ async def ventas_semana_logic():
     conn.close()
     return res[0], res[1]
 
-async def stock_bajo_logic():
+def stock_bajo_sync():
     query = """
     SELECT nombre, stock_actual 
     FROM productos 
@@ -146,7 +146,7 @@ async def stock_bajo_logic():
     conn.close()
     return filas
 
-async def valorizacion_logic():
+def valorizacion_sync():
     query = """
     SELECT SUM(stock_actual * costo_compra) AS costo_total, SUM(stock_actual * precio_venta) AS valor_venta_total
     FROM productos;
@@ -299,7 +299,7 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------------------------------------------------
 # GENERADOR DE PDF MENSUAL
 # -------------------------------------------------------------------
-async def generar_pdf_mes():
+def generar_pdf_mes_sync():
     query = """
     SELECT v.id_venta, v.fecha_venta, c.nombre AS cliente, v.tipo_pago, SUM(dv.cantidad * dv.precio_unitario) AS total
     FROM ventas v
@@ -361,22 +361,22 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "btn_ventas_hoy":
-        cnt, total = await ventas_hoy_logic()
+        cnt, total = ventas_hoy_sync()
         msg = f"📊 **Ventas de Hoy (Acumulado en tiempo real):**\n\n🔢 Transacciones: {cnt}\n💰 Recaudado: {formatear_cop(total)}"
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_ventas_semana":
-        cnt, total = await ventas_semana_logic()
+        cnt, total = ventas_semana_sync()
         msg = f"📅 **Lo que va de Semana (Acumulado actual):**\n\n🔢 Transacciones: {cnt}\n💰 Recaudación total: {formatear_cop(total)}"
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_valorizacion":
-        costo, venta = await valorizacion_logic()
+        costo, venta = valorizacion_sync()
         msg = f"🏢 **Valorización de Bodega:**\n\n💵 Invertido: {formatear_cop(costo)}\n📈 Valor Venta: {formatear_cop(venta)}"
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_stock_bajo":
-        filas = await stock_bajo_logic()
+        filas = stock_bajo_sync()
         if not filas:
             await query.message.reply_text("✅ Inventario en niveles óptimos.", reply_markup=obtener_teclado_menu())
         else:
@@ -387,32 +387,50 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "btn_reporte_pdf":
         await query.message.reply_text("🔄 Generando reporte PDF del mes...")
-        pdf_buffer = await generar_pdf_mes()
+        pdf_buffer = generar_pdf_mes_sync()
         await query.message.reply_document(document=pdf_buffer, filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf")
 
     elif query.data == "btn_ayuda":
         await ayuda(update, context)
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS (CIERRE DIARIO Y SEMANAL)
+# TAREAS AUTOMÁTICAS PROGRAMADAS
 # -------------------------------------------------------------------
-async def enviar_cierre_diario(bot):
-    if CHAT_ID_ADMIN:
+def tarea_cierre_diario():
+    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
         try:
-            cnt, total = await ventas_hoy_logic()
+            cnt, total = ventas_hoy_sync()
             msg = f"🔔 **CIERRE AUTOMÁTICO DEL DÍA (7:00 PM)** 🔔\n\n🔢 Ventas realizadas hoy: {cnt}\n💰 Total recaudado hoy: {formatear_cop(total)}"
-            await bot.send_message(chat_id=CHAT_ID_ADMIN, text=msg, parse_mode="Markdown")
+            
+            async def send():
+                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+                async with ptb_app:
+                    await ptb_app.bot.send_message(chat_id=CHAT_ID_ADMIN, text=msg, parse_mode="Markdown")
+            
+            asyncio.run(send())
         except Exception as e:
             logging.error(f"Error en cierre diario automático: {e}")
 
-async def enviar_cierre_semanal(bot):
-    if CHAT_ID_ADMIN:
+def tarea_cierre_semanal():
+    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
         try:
-            cnt, total = await ventas_semana_logic()
+            cnt, total = ventas_semana_sync()
             msg = f"📊 **BALANCE AUTOMÁTICO SEMANAL (DOMINGO 8:00 PM)** 📊\n\n🔢 Total transacciones semana: {cnt}\n💰 Recaudación total semana: {formatear_cop(total)}"
-            await bot.send_message(chat_id=CHAT_ID_ADMIN, text=msg, parse_mode="Markdown")
+            
+            async def send():
+                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+                async with ptb_app:
+                    await ptb_app.bot.send_message(chat_id=CHAT_ID_ADMIN, text=msg, parse_mode="Markdown")
+            
+            asyncio.run(send())
         except Exception as e:
             logging.error(f"Error en cierre semanal automático: {e}")
+
+# Inicialización de Scheduler en segundo plano (BackgroundScheduler)
+scheduler = BackgroundScheduler()
+scheduler.add_job(tarea_cierre_diario, 'cron', hour=19, minute=0)
+scheduler.add_job(tarea_cierre_semanal, 'cron', day_of_week='sun', hour=20, minute=0)
+scheduler.start()
 
 # -------------------------------------------------------------------
 # FLASK Y WEBHOOK
@@ -434,8 +452,6 @@ def webhook():
             ptb_app.add_handler(CommandHandler("ayuda", ayuda))
             ptb_app.add_handler(CommandHandler("venta", registrar_venta))
             ptb_app.add_handler(CommandHandler("compra", registrar_compra))
-            ptb_app.add_handler(CommandHandler("ventas_hoy", lambda u, c: manejar_callback(u, c)))
-            ptb_app.add_handler(CommandHandler("ventas_semana", lambda u, c: manejar_callback(u, c)))
             
             ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
             ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
@@ -453,14 +469,6 @@ def webhook():
             loop.close()
             
         return 'ok', 200
-
-# Planificador para tareas automáticas
-scheduler = AsyncIOScheduler()
-# 1. Cierre Diario a las 7:00 PM (19:00 horas todos los días)
-scheduler.add_job(lambda: asyncio.run(enviar_cierre_diario(ApplicationBuilder().token(TELEGRAM_TOKEN).build().bot)), 'cron', hour=19, minute=0)
-# 2. Cierre Semanal a las 8:00 PM (20:00 horas todos los domingos)
-scheduler.add_job(lambda: asyncio.run(enviar_cierre_semanal(ApplicationBuilder().token(TELEGRAM_TOKEN).build().bot)), 'cron', day_of_week='sun', hour=20, minute=0)
-scheduler.start()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
