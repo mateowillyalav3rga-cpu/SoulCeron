@@ -229,7 +229,7 @@ async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **Error al consultar cliente:** {str(e)}")
 
 # -------------------------------------------------------------------
-# REGISTRO DE VENTAS Y COMPRAS
+# REGISTRO DE VENTAS (/venta) CON VERIFICACIÓN DE EXISTENCIA
 # -------------------------------------------------------------------
 async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
@@ -239,88 +239,118 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     productos_matches = re.findall(r"-\s*(.+?),\s*(\d+)", texto)
 
     if not cliente_match or not pago_match or not productos_matches:
-        await update.message.reply_text("❌ **Formato incorrecto.** Usa:\n/venta\nCliente: Nombre\nPago: contado\n- Producto, Cantidad")
+        await update.message.reply_text("❌ **Formato incorrecto.** Usa:\n/venta\nCliente: Nombre\nPago: contado\n- Producto, Cantidad", parse_mode="Markdown")
         return
 
     cliente_nombre = cliente_match.group(1).strip()
     tipo_pago = pago_match.group(1).strip().lower()
 
     if tipo_pago not in ['contado', 'credito']:
-        await update.message.reply_text("❌ El tipo de pago debe ser exclusivamente `contado` o `credito`.")
+        await update.message.reply_text("❌ El tipo de pago debe ser exclusivamente `contado` o `credito`.", parse_mode="Markdown")
         return
-
-    bloques_productos = []
-    for prod_nombre, cantidad in productos_matches:
-        prod_clean = prod_nombre.strip()
-        cant = int(cantidad)
-
-        sql_block = f"""
-        SELECT nv.id_venta, p.id_producto, {cant}, p.precio_venta
-        FROM nueva_venta nv, (
-            SELECT id_producto, precio_venta 
-            FROM productos 
-            WHERE LOWER(nombre) LIKE LOWER('%{prod_clean}%') 
-            ORDER BY 
-                CASE WHEN LOWER(nombre) = LOWER('{prod_clean}') THEN 1 ELSE 2 END,
-                LENGTH(nombre) ASC 
-            LIMIT 1
-        ) p
-        """
-        bloques_productos.append(sql_block)
-
-    query_productos_sql = "\nUNION ALL\n".join(bloques_productos)
-
-    query_completa = f"""
-    WITH cliente_existente AS (
-        SELECT id_cliente FROM clientes WHERE LOWER(nombre) LIKE LOWER('%{cliente_nombre}%') LIMIT 1
-    ),
-    cliente_creado AS (
-        INSERT INTO clientes (nombre)
-        SELECT '{cliente_nombre}'
-        WHERE NOT EXISTS (SELECT 1 FROM cliente_existente)
-        RETURNING id_cliente
-    ),
-    cliente_final AS (
-        SELECT id_cliente FROM cliente_existente UNION ALL SELECT id_cliente FROM cliente_creado
-    ),
-    nueva_venta AS (
-        INSERT INTO ventas (id_cliente, tipo_pago)
-        SELECT id_cliente, '{tipo_pago}' FROM cliente_final
-        RETURNING id_venta
-    ),
-    insertar_detalles AS (
-        INSERT INTO detalle_ventas (id_venta, id_producto, cantidad, precio_unitario)
-        {query_productos_sql}
-        RETURNING id_venta, (cantidad * precio_unitario) AS subtotal
-    )
-    SELECT id_venta, SUM(subtotal) AS total
-    FROM insertar_detalles
-    GROUP BY id_venta;
-    """
 
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute(query_completa)
-        res = cur.fetchone()
+
+        # 1. Verificar qué productos existen y cuáles no
+        productos_encontrados = []
+        productos_no_encontrados = []
+
+        for prod_nombre, cant in productos_matches:
+            prod_clean = prod_nombre.strip()
+            cantidad = int(cant)
+
+            query_check = """
+            SELECT id_producto, nombre, precio_venta 
+            FROM productos 
+            WHERE LOWER(nombre) LIKE LOWER(%s) 
+            ORDER BY 
+                CASE WHEN LOWER(nombre) = LOWER(%s) THEN 1 ELSE 2 END,
+                LENGTH(nombre) ASC 
+            LIMIT 1;
+            """
+            cur.execute(query_check, (f'%{prod_clean}%', prod_clean))
+            prod_res = cur.fetchone()
+
+            if prod_res:
+                productos_encontrados.append({
+                    'id_producto': prod_res[0],
+                    'nombre_real': prod_res[1],
+                    'cantidad': cantidad,
+                    'precio_unitario': prod_res[2],
+                    'subtotal': cantidad * prod_res[2]
+                })
+            else:
+                productos_no_encontrados.append(prod_clean)
+
+        # Si hay productos no encontrados, abortamos la venta y notificamos
+        if productos_no_encontrados:
+            cur.close()
+            conn.close()
+            lineas_error = ["🔴 **Venta cancelada. Los siguientes productos no existen en la base de datos:**\n"]
+            for p_err in productos_no_encontrados:
+                lineas_error.append(f"❌ `{p_err}`")
+            lineas_error.append("\n💡 *Regístralos primero con `/compra` antes de venderlos.*")
+            await update.message.reply_text("\n".join(lineas_error), parse_mode="Markdown")
+            return
+
+        # 2. Si todos existen, procedemos con la inserción de la venta
+        query_cliente = """
+        WITH cliente_existente AS (
+            SELECT id_cliente FROM clientes WHERE LOWER(nombre) LIKE LOWER(%s) LIMIT 1
+        ),
+        cliente_creado AS (
+            INSERT INTO clientes (nombre)
+            SELECT %s
+            WHERE NOT EXISTS (SELECT 1 FROM cliente_existente)
+            RETURNING id_cliente
+        )
+        SELECT id_cliente FROM cliente_existente UNION ALL SELECT id_cliente FROM cliente_creado LIMIT 1;
+        """
+        cur.execute(query_cliente, (f'%{cliente_nombre}%', cliente_nombre))
+        id_cliente = cur.fetchone()[0]
+
+        query_nueva_venta = "INSERT INTO ventas (id_cliente, tipo_pago) VALUES (%s, %s) RETURNING id_venta;"
+        cur.execute(query_nueva_venta, (id_cliente, tipo_pago))
+        id_venta = cur.fetchone()[0]
+
+        total_venta = 0
+        lista_detalles_msg = []
+
+        for item in productos_encontrados:
+            query_detalle = """
+            INSERT INTO detalle_ventas (id_venta, id_producto, cantidad, precio_unitario)
+            VALUES (%s, %s, %s, %s);
+            """
+            cur.execute(query_detalle, (id_venta, item['id_producto'], item['cantidad'], item['precio_unitario']))
+            
+            # Actualizar stock del producto
+            query_descuento = "UPDATE productos SET stock_actual = stock_actual - %s WHERE id_producto = %s;"
+            cur.execute(query_descuento, (item['cantidad'], item['id_producto']))
+
+            total_venta += item['subtotal']
+            lista_detalles_msg.append(f"• **{item['nombre_real']}** x{item['cantidad']} — `{formatear_cop(item['subtotal'])}`")
+
         conn.commit()
         cur.close()
         conn.close()
 
-        id_venta_registrada = res[0]
-        total_venta = res[1]
-
-        respuesta = (
-            f"🎉 **¡Venta #{id_venta_registrada} Registrada!** 🎉\n\n"
+        msg = (
+            f"🎉 **¡Venta #{id_venta} Registrada Exitosamente!** 🎉\n\n"
             f"👤 **Cliente:** {cliente_nombre}\n"
-            f"💳 **Método de Pago:** {tipo_pago.capitalize()}\n"
-            f"📦 **Ítems vendidos:** {len(productos_matches)}\n\n"
-            f"💰 **Total Cobrado:** `{formatear_cop(total_venta)}`"
+            f"💳 **Método de Pago:** {tipo_pago.capitalize()}\n\n"
+            f"📋 **Productos Procesados:**\n" + "\n".join(lista_detalles_msg) + "\n\n"
+            f"💰 **TOTAL COBRADO:** `{formatear_cop(total_venta)}`"
         )
-        await update.message.reply_text(enviar_mensaje_seguro(respuesta), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+        await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
+# -------------------------------------------------------------------
+# REGISTRO DE COMPRAS (/compra) CON DETECCIÓN DE NUEVOS REGISTROS
+# -------------------------------------------------------------------
 async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     items = re.findall(r"-\s*(.+?),\s*(\d+),\s*(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)", texto)
@@ -340,27 +370,36 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
             costo = float(costo_str)
             precio = float(precio_str)
 
-            query_update = f"""
+            # Intentar actualizar producto existente
+            query_update = """
             UPDATE productos 
-            SET stock_actual = stock_actual + {cant},
-                costo_compra = {costo},
-                precio_venta = {precio}
-            WHERE LOWER(nombre) LIKE LOWER('%{prod_clean}%')
+            SET stock_actual = stock_actual + %s,
+                costo_compra = %s,
+                precio_venta = %s
+            WHERE LOWER(nombre) LIKE LOWER(%s)
             RETURNING nombre, stock_actual;
             """
-            cur.execute(query_update)
+            cur.execute(query_update, (cant, costo, precio, f'%{prod_clean}%'))
             res = cur.fetchone()
 
             if res:
-                resúmenes.append(f"• **{res[0]}**: +{cant} uds. (Nuevo Stock: `{res[1]}`)")
+                resúmenes.append(f"• **{res[0]}** `[REABASTECIDO]`\n   └ +{cant} uds. (Nuevo Stock: `{res[1]}`) | Costo: `{formatear_cop(costo)}` | Venta: `{formatear_cop(precio)}`")
             else:
-                resúmenes.append(f"⚠️ **{prod_clean}**: No encontrado en la base de datos.")
+                # Si no existe, crearlo como NUEVO REGISTRO (Categoría 1 Maquillaje por defecto)
+                query_insert = """
+                INSERT INTO productos (nombre, stock_actual, costo_compra, precio_venta, id_categoria)
+                VALUES (%s, %s, %s, %s, 1)
+                RETURNING nombre, stock_actual;
+                """
+                cur.execute(query_insert, (prod_clean, cant, costo, precio))
+                nuevo_res = cur.fetchone()
+                resúmenes.append(f"✨ **{nuevo_res[0]}** `[NUEVO REGISTRO]`\n   └ Stock inicial: `{nuevo_res[1]}` uds. | Costo: `{formatear_cop(costo)}` | Venta: `{formatear_cop(precio)}`")
 
         conn.commit()
         cur.close()
         conn.close()
 
-        msg = f"📦 **Reabastecimiento de Inventario**\n\n" + "\n\n".join(resúmenes)
+        msg = f"📦 **Resumen de Reabastecimiento / Compras:**\n\n" + "\n\n".join(resúmenes)
         await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar compra:** {str(e)}")
@@ -556,7 +595,6 @@ def webhook():
         async def process():
             ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
             
-            # Registro de Comandos de Telegram
             ptb_app.add_handler(CommandHandler("start", start))
             ptb_app.add_handler(CommandHandler("menu", start))
             ptb_app.add_handler(CommandHandler("ayuda", ayuda))
@@ -564,7 +602,6 @@ def webhook():
             ptb_app.add_handler(CommandHandler("compra", registrar_compra))
             ptb_app.add_handler(CommandHandler("cliente", consultar_cliente))
             
-            # Registro de Callbacks y Filtros de Texto
             ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
             ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
             ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/compra"), registrar_compra))
