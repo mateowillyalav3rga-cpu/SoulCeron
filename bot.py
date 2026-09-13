@@ -96,7 +96,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text(mensaje, reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
 # -------------------------------------------------------------------
-# LÓGICA DE CONSULTAS SQL CON pr.nombre_empresa
+# LÓGICA DE CONSULTAS SQL
 # -------------------------------------------------------------------
 def ventas_hoy_sync():
     query = """
@@ -557,25 +557,38 @@ def generar_pdf_valorizacion_sync():
         Paragraph(f"Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
     ]
 
-    tabla_data = [["Producto", "Stock", "Costo U.", "Precio Venta", "Proveedor"]]
-    
+    tabla_data = [["Producto", "Stock", "Costo U.", "Costo Total", "Precio V.", "Venta Total", "Proveedor"]]
+    total_costo_inv = 0
+    total_venta_pot = 0
+
     for nombre, stock, costo, precio, proveedor in productos:
+        costo_total = stock * costo
+        venta_total = stock * precio
+        total_costo_inv += costo_total
+        total_venta_pot += venta_total
+
         tabla_data.append([
             str(nombre),
             str(stock),
             formatear_cop(costo),
+            formatear_cop(costo_total),
             formatear_cop(precio),
+            formatear_cop(venta_total),
             str(proveedor)
         ])
 
-    t = Table(tabla_data, colWidths=[185, 45, 85, 85, 150])
+    ganancia_potencial = total_venta_pot - total_costo_inv
+    tabla_data.append(["TOTALES:", "", "", formatear_cop(total_costo_inv), "", formatear_cop(total_venta_pot), f"Ganancia: {formatear_cop(ganancia_potencial)}"])
+
+    t = Table(tabla_data, colWidths=[120, 35, 65, 75, 65, 75, 69])
     t.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F8BBD0')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#880E4F')),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('FONTSIZE', (0, 0), (-1, -1), 7),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E0E0E0')),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
         ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#F5F5F5')),
     ]))
 
@@ -688,6 +701,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query.data == "btn_valorizacion":
             costo, venta = valorizacion_sync()
+            ganancia_est = venta - costo
             if costo == 0 and venta == 0:
                 msg = "ℹ️ **No se encontraron productos registrados en inventario para calcular la valorización.**"
                 await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
@@ -695,8 +709,9 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = (
                     f"🏢 **Valorización de Bodega**\n\n"
                     f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
-                    f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`\n\n"
-                    f"📄 *Adjunto encontrarás el reporte PDF completo del inventario y sus proveedores.*"
+                    f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`\n"
+                    f"💎 **Ganancia Potencial Estimada:** `{formatear_cop(ganancia_est)}`\n\n"
+                    f"📄 *Adjunto encontrarás el reporte PDF completo del inventario.*"
                 )
                 pdf_buffer = generar_pdf_valorizacion_sync()
                 await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
@@ -714,10 +729,10 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 lineas = [
                     "🚫 **Productos Totalmente Agotados (0 uds.)**\n",
-                    "📄 *Adjunto encontrarás el reporte PDF con la lista completa y sus proveedores.*"
+                    "📄 *Adjunto encontrarás el reporte PDF con la lista completa.*"
                 ]
                 for n, s, c, p, prov in filas:
-                    lineas.append(f"• **{n}** _({prov})_")
+                    lineas.append(f"• **{n}**")
                 
                 pdf_buffer = generar_pdf_agotados_sync()
                 await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
