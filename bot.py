@@ -96,14 +96,14 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text(mensaje, reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
 # -------------------------------------------------------------------
-# LÓGICA DE CONSULTAS SQL
+# LÓGICA DE CONSULTAS SQL (CORREGIDAS A v.fecha)
 # -------------------------------------------------------------------
 def ventas_hoy_sync():
     query = """
     SELECT COUNT(DISTINCT v.id_venta) AS total_ventas, COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE DATE(v.fecha_venta) = CURRENT_DATE;
+    WHERE DATE(v.fecha) = CURRENT_DATE;
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -116,15 +116,15 @@ def ventas_hoy_sync():
 def ventas_semana_sync():
     query_dias = """
     SELECT 
-        DATE(v.fecha_venta) AS fecha,
-        TO_CHAR(v.fecha_venta, 'TMDay') AS dia_nombre,
+        DATE(v.fecha) AS fecha,
+        TO_CHAR(v.fecha, 'TMDay') AS dia_nombre,
         COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_dia,
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS contado_dia,
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS credito_dia
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE DATE_TRUNC('week', v.fecha_venta) = DATE_TRUNC('week', CURRENT_DATE)
-    GROUP BY DATE(v.fecha_venta), TO_CHAR(v.fecha_venta, 'TMDay')
+    WHERE DATE_TRUNC('week', v.fecha) = DATE_TRUNC('week', CURRENT_DATE)
+    GROUP BY DATE(v.fecha), TO_CHAR(v.fecha, 'TMDay')
     ORDER BY fecha ASC;
     """
     
@@ -138,7 +138,7 @@ def ventas_semana_sync():
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
     JOIN productos p ON dv.id_producto = p.id_producto
-    WHERE DATE_TRUNC('week', v.fecha_venta) = DATE_TRUNC('week', CURRENT_DATE);
+    WHERE DATE_TRUNC('week', v.fecha) = DATE_TRUNC('week', CURRENT_DATE);
     """
     
     conn = get_db_connection()
@@ -321,17 +321,17 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **Error al registrar compra:** {str(e)}")
 
 # -------------------------------------------------------------------
-# GENERADOR DE PDF MENSUAL
+# GENERADOR DE PDF MENSUAL (CORREGIDO A v.fecha)
 # -------------------------------------------------------------------
 def generar_pdf_mes_sync():
     query = """
-    SELECT v.id_venta, v.fecha_venta, c.nombre AS cliente, v.tipo_pago, SUM(dv.cantidad * dv.precio_unitario) AS total
+    SELECT v.id_venta, v.fecha, c.nombre AS cliente, v.tipo_pago, SUM(dv.cantidad * dv.precio_unitario) AS total
     FROM ventas v
     JOIN clientes c ON v.id_cliente = c.id_cliente
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE DATE_TRUNC('month', v.fecha_venta) = DATE_TRUNC('month', CURRENT_DATE)
-    GROUP BY v.id_venta, v.fecha_venta, c.nombre, v.tipo_pago
-    ORDER BY v.fecha_venta ASC;
+    WHERE DATE_TRUNC('month', v.fecha) = DATE_TRUNC('month', CURRENT_DATE)
+    GROUP BY v.id_venta, v.fecha, c.nombre, v.tipo_pago
+    ORDER BY v.fecha ASC;
     """
     conn = get_db_connection()
     cur = conn.cursor()
