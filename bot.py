@@ -75,8 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje = (
-        "🤖 **Formatos de Registro y Consultas**\n"
-        "───────────────────────────────\n\n"
+        "🤖 **Formatos de Registro y Consultas**\n\n"
         "📝 **Registrar Venta:**\n"
         "```text\n"
         "/venta\n"
@@ -98,7 +97,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text(mensaje, reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
 # -------------------------------------------------------------------
-# LÓGICA DE CONSULTAS SQL
+# LÓGICA DE CONSULTAS SQL (EJECUCIÓN ASÍNCRONA VIA TO_THREAD)
 # -------------------------------------------------------------------
 def ventas_hoy_sync():
     query = """
@@ -256,20 +255,22 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
 
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(query_completa)
-        res = cur.fetchone()
-        conn.commit()
-        
+        def ejecutar_venta_sync():
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(query_completa)
+            res = cur.fetchone()
+            conn.commit()
+            cur.close()
+            conn.close()
+            return res
+
+        res = await asyncio.to_thread(ejecutar_venta_sync)
         id_venta_registrada = res[0]
         total_venta = res[1]
-        cur.close()
-        conn.close()
 
         respuesta = (
-            f"🎉 **¡Venta #{id_venta_registrada} Registrada!** 🎉\n"
-            f"───────────────────────────────\n\n"
+            f"🎉 **¡Venta #{id_venta_registrada} Registrada!** 🎉\n\n"
             f"👤 **Cliente:** {cliente_nombre}\n"
             f"💳 **Método de Pago:** {tipo_pago.capitalize()}\n"
             f"📦 **Ítems vendidos:** {len(productos_matches)}\n\n"
@@ -288,40 +289,40 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        resúmenes = []
+        def ejecutar_compra_sync():
+            conn = get_db_connection()
+            cur = conn.cursor()
+            resúmenes = []
 
-        for prod_nombre, cant_str, costo_str, precio_str in items:
-            prod_clean = prod_nombre.strip()
-            cant = int(cant_str)
-            costo = float(costo_str)
-            precio = float(precio_str)
+            for prod_nombre, cant_str, costo_str, precio_str in items:
+                prod_clean = prod_nombre.strip()
+                cant = int(cant_str)
+                costo = float(costo_str)
+                precio = float(precio_str)
 
-            query_update = f"""
-            UPDATE productos 
-            SET stock_actual = stock_actual + {cant},
-                costo_compra = {costo},
-                precio_venta = {precio}
-            WHERE LOWER(nombre) LIKE LOWER('%{prod_clean}%')
-            RETURNING nombre, stock_actual;
-            """
-            cur.execute(query_update)
-            res = cur.fetchone()
+                query_update = f"""
+                UPDATE productos 
+                SET stock_actual = stock_actual + {cant},
+                    costo_compra = {costo},
+                    precio_venta = {precio}
+                WHERE LOWER(nombre) LIKE LOWER('%{prod_clean}%')
+                RETURNING nombre, stock_actual;
+                """
+                cur.execute(query_update)
+                res = cur.fetchone()
 
-            if res:
-                resúmenes.append(f"• **{res[0]}**: +{cant} uds. (Nuevo Stock: `{res[1]}`)")
-            else:
-                resúmenes.append(f"⚠️ **{prod_clean}**: No encontrado en la base de datos.")
+                if res:
+                    resúmenes.append(f"• **{res[0]}**: +{cant} uds. (Nuevo Stock: `{res[1]}`)")
+                else:
+                    resúmenes.append(f"⚠️ **{prod_clean}**: No encontrado en la base de datos.")
 
-        conn.commit()
-        cur.close()
-        conn.close()
+            conn.commit()
+            cur.close()
+            conn.close()
+            return resúmenes
 
-        msg = (
-            f"📦 **Reabastecimiento de Inventario**\n"
-            f"───────────────────────────────\n\n" + "\n\n".join(resúmenes)
-        )
+        resúmenes = await asyncio.to_thread(ejecutar_compra_sync)
+        msg = f"📦 **Reabastecimiento de Inventario**\n\n" + "\n\n".join(resúmenes)
         await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al registrar compra:** {str(e)}")
@@ -391,22 +392,19 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "btn_ventas_hoy":
-        cnt, total = ventas_hoy_sync()
+        cnt, total = await asyncio.to_thread(ventas_hoy_sync)
         msg = (
-            f"📊 **Ventas del Día de Hoy**\n"
-            f"───────────────────────────────\n\n"
+            f"📊 **Ventas del Día de Hoy**\n\n"
             f"🔢 **Transacciones:** {cnt}\n"
             f"💰 **Total Recaudado:** `{formatear_cop(total)}`"
         )
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_ventas_semana":
-        dias, totales = ventas_semana_sync()
+        dias, totales = await asyncio.to_thread(ventas_semana_sync)
         cnt, total, contado, credito, ganancia = totales
         
-        mensaje = []
-        mensaje.append("📅 **Balance de la Semana**")
-        mensaje.append("───────────────────────────────\n")
+        mensaje = ["📅 **Balance de la Semana**\n"]
         mensaje.append("📆 **Desglose Diario:**\n")
         
         if not dias:
@@ -420,49 +418,46 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"   └ Total: `{formatear_cop(total_dia)}`  *(💵 `{formatear_cop(contado_dia)}` | 💳 `{formatear_cop(credito_dia)}`)*\n"
                 )
         
-        mensaje.append("───────────────────────────────")
-        mensaje.append("📊 **Resumen General de la Semana:**\n")
+        mensaje.append("\n📊 **Resumen General:**\n")
         mensaje.append(f"🔢 **Transacciones:** {cnt}")
         mensaje.append(f"💵 **Total Contado:** `{formatear_cop(contado)}`")
         mensaje.append(f"💳 **Total Crédito:** `{formatear_cop(credito)}`")
-        mensaje.append(f"💰 **Recaudación Total:** `{formatear_cop(total)}`\n")
+        mensaje.append(f"💰 **Recaudación Total:** `{formatear_cop(total)}`")
         mensaje.append(f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`")
 
         msg_final = "\n".join(mensaje)
         await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_valorizacion":
-        costo, venta = valorizacion_sync()
+        costo, venta = await asyncio.to_thread(valorizacion_sync)
         msg = (
-            f"🏢 **Valorización de Bodega**\n"
-            f"───────────────────────────────\n\n"
+            f"🏢 **Valorización de Bodega**\n\n"
             f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
             f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`"
         )
         await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_stock_bajo":
-        filas = stock_bajo_sync()
+        filas = await asyncio.to_thread(stock_bajo_sync)
         if not filas:
             await query.message.reply_text("✅ ¡Excelente! No hay productos de Maquillaje totalmente agotados.", reply_markup=obtener_teclado_menu())
         else:
-            lineas = [
-                "🚫 **Productos de Maquillaje Agotados (0 uds.)**",
-                "───────────────────────────────\n"
-            ]
+            lineas = ["🚫 **Productos de Maquillaje Agotados (0 uds.)**\n"]
             for n, s in filas:
                 lineas.append(f"• **{n}**")
             await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
     elif query.data == "btn_reporte_pdf":
-        await query.message.reply_text("🔄 Generando reporte PDF del mes...")
-        loop = asyncio.get_running_loop()
-        pdf_buffer = await loop.run_in_executor(None, generar_pdf_mes_sync)
-        await query.message.reply_document(
+        msg_espera = await query.message.reply_text("🔄 Generando reporte PDF del mes...")
+        pdf_buffer = await asyncio.to_thread(generar_pdf_mes_sync)
+        
+        await context.bot.send_document(
+            chat_id=query.message.chat_id,
             document=pdf_buffer, 
             filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf",
-            caption="📄 Aquí tienes tu reporte PDF listo para consultar."
+            caption="📄 Aquí tienes tu reporte PDF del mes listo para consultar."
         )
+        await msg_espera.delete()
 
     elif query.data == "btn_ayuda":
         await ayuda(update, context)
@@ -475,8 +470,7 @@ def tarea_cierre_diario():
         try:
             cnt, total = ventas_hoy_sync()
             msg = (
-                f"🔔 **Cierre de Caja Automático (7:00 PM)** 🔔\n"
-                f"───────────────────────────────\n\n"
+                f"🔔 **Cierre de Caja Automático (7:00 PM)** 🔔\n\n"
                 f"🔢 **Ventas realizadas hoy:** {cnt}\n"
                 f"💰 **Total recaudado:** `{formatear_cop(total)}`"
             )
