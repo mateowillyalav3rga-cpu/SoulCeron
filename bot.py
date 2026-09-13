@@ -403,7 +403,6 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # GENERADORES DE PDF (MENSUAL Y SEMANAL)
 # -------------------------------------------------------------------
 def generar_pdf_mes_sync(mes_offset=0):
-    # mes_offset=0 es el mes actual. mes_offset=1 (o -1) permite calcular el mes anterior
     query = """
     SELECT v.id_venta, v.fecha, c.nombre AS cliente, v.tipo_pago, SUM(dv.cantidad * dv.precio_unitario) AS total
     FROM ventas v
@@ -551,6 +550,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not totales or totales[0] == 0:
                 msg_final = "ℹ️ **No se encontraron ventas registradas en lo que va de esta semana.**"
+                await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
             else:
                 cnt, total, contado, credito, ganancia = totales
                 mensaje = ["📅 **Balance de la Semana**\n"]
@@ -569,10 +569,19 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mensaje.append(f"💵 **Total Contado:** `{formatear_cop(contado)}`")
                 mensaje.append(f"💳 **Total Crédito:** `{formatear_cop(credito)}`")
                 mensaje.append(f"💰 **Recaudación Total:** `{formatear_cop(total)}`")
-                mensaje.append(f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`")
+                mensaje.append(f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`\n")
+                mensaje.append("📄 *Adjunto encontrarás el reporte PDF detallado de la semana.*")
 
                 msg_final = "\n".join(mensaje)
-            await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+                pdf_buffer = generar_pdf_semana_sync()
+
+                await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+                if pdf_buffer:
+                    pdf_buffer.seek(0)
+                    await query.message.reply_document(
+                        document=pdf_buffer,
+                        filename=f"Balance_Semanal_{datetime.now().strftime('%d_%m_%Y')}.pdf"
+                    )
 
         elif query.data == "btn_valorizacion":
             costo, venta = valorizacion_sync()
@@ -683,7 +692,6 @@ def tarea_cierre_semanal():
             logging.error(f"Error en cierre semanal automático: {e}")
 
 def tarea_cierre_mensual_automatico():
-    # Se ejecuta el día 1 de cada mes a las 8:00 AM y genera el reporte del mes anterior (offset=1)
     if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
         try:
             pdf_buffer = generar_pdf_mes_sync(mes_offset=1)
@@ -714,11 +722,8 @@ def tarea_cierre_mensual_automatico():
             logging.error(f"Error en reporte mensual automático: {e}")
 
 scheduler = BackgroundScheduler()
-# Cierre Diario a las 7:00 PM (19:00 hrs)
 scheduler.add_job(tarea_cierre_diario, 'cron', hour=19, minute=0)
-# Cierre Semanal todos los domingos a las 8:00 PM (20:00 hrs)
 scheduler.add_job(tarea_cierre_semanal, 'cron', day_of_week='sun', hour=20, minute=0)
-# Cierre Mensual automático el día 1 de cada mes a las 8:00 AM
 scheduler.add_job(tarea_cierre_mensual_automatico, 'cron', day=1, hour=8, minute=0)
 scheduler.start()
 
