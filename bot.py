@@ -2,7 +2,6 @@ import os
 import re
 import io
 import logging
-import asyncio
 import psycopg2
 from datetime import datetime
 from flask import Flask, request
@@ -32,7 +31,7 @@ CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")
 web_app = Flask(__name__)
 
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
+    return psycopg2.connect(DATABASE_URL, sslmode='require', connect_timeout=10)
 
 def enviar_mensaje_seguro(texto: str, max_length: int = 4000) -> str:
     if len(texto) > max_length:
@@ -255,17 +254,14 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
 
     try:
-        def ejecutar_venta_sync():
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute(query_completa)
-            res = cur.fetchone()
-            conn.commit()
-            cur.close()
-            conn.close()
-            return res
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(query_completa)
+        res = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
 
-        res = await asyncio.to_thread(ejecutar_venta_sync)
         id_venta_registrada = res[0]
         total_venta = res[1]
 
@@ -289,39 +285,36 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        def ejecutar_compra_sync():
-            conn = get_db_connection()
-            cur = conn.cursor()
-            resúmenes = []
+        conn = get_db_connection()
+        cur = conn.cursor()
+        resúmenes = []
 
-            for prod_nombre, cant_str, costo_str, precio_str in items:
-                prod_clean = prod_nombre.strip()
-                cant = int(cant_str)
-                costo = float(costo_str)
-                precio = float(precio_str)
+        for prod_nombre, cant_str, costo_str, precio_str in items:
+            prod_clean = prod_nombre.strip()
+            cant = int(cant_str)
+            costo = float(costo_str)
+            precio = float(precio_str)
 
-                query_update = f"""
-                UPDATE productos 
-                SET stock_actual = stock_actual + {cant},
-                    costo_compra = {costo},
-                    precio_venta = {precio}
-                WHERE LOWER(nombre) LIKE LOWER('%{prod_clean}%')
-                RETURNING nombre, stock_actual;
-                """
-                cur.execute(query_update)
-                res = cur.fetchone()
+            query_update = f"""
+            UPDATE productos 
+            SET stock_actual = stock_actual + {cant},
+                costo_compra = {costo},
+                precio_venta = {precio}
+            WHERE LOWER(nombre) LIKE LOWER('%{prod_clean}%')
+            RETURNING nombre, stock_actual;
+            """
+            cur.execute(query_update)
+            res = cur.fetchone()
 
-                if res:
-                    resúmenes.append(f"• **{res[0]}**: +{cant} uds. (Nuevo Stock: `{res[1]}`)")
-                else:
-                    resúmenes.append(f"⚠️ **{prod_clean}**: No encontrado en la base de datos.")
+            if res:
+                resúmenes.append(f"• **{res[0]}**: +{cant} uds. (Nuevo Stock: `{res[1]}`)")
+            else:
+                resúmenes.append(f"⚠️ **{prod_clean}**: No encontrado en la base de datos.")
 
-            conn.commit()
-            cur.close()
-            conn.close()
-            return resúmenes
+        conn.commit()
+        cur.close()
+        conn.close()
 
-        resúmenes = await asyncio.to_thread(ejecutar_compra_sync)
         msg = f"📦 **Reabastecimiento de Inventario**\n\n" + "\n\n".join(resúmenes)
         await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
     except Exception as e:
@@ -394,86 +387,87 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "btn_ventas_hoy":
-        cnt, total = await asyncio.to_thread(ventas_hoy_sync)
-        if cnt == 0:
-            msg = "ℹ️ **No se encontraron ventas registradas en el día de hoy.**"
-        else:
-            msg = (
-                f"📊 **Ventas del Día de Hoy**\n\n"
-                f"🔢 **Transacciones:** {cnt}\n"
-                f"💰 **Total Recaudado:** `{formatear_cop(total)}`"
-            )
-        await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
-
-    elif query.data == "btn_ventas_semana":
-        dias, totales = await asyncio.to_thread(ventas_semana_sync)
-        
-        if not totales or totales[0] == 0:
-            msg_final = "ℹ️ **No se encontraron ventas registradas en lo que va de esta semana.**"
-        else:
-            cnt, total, contado, credito, ganancia = totales
-            mensaje = ["📅 **Balance de la Semana**\n"]
-            mensaje.append("📆 **Desglose Diario:**\n")
-            
-            for fecha, dia_nombre, total_dia, contado_dia, credito_dia in dias:
-                dia_clean = dia_nombre.strip().capitalize()
-                fecha_str = fecha.strftime('%d/%m')
-                mensaje.append(
-                    f"🔹 **{dia_clean}** ({fecha_str})\n"
-                    f"   └ Total: `{formatear_cop(total_dia)}`  *(💵 `{formatear_cop(contado_dia)}` | 💳 `{formatear_cop(credito_dia)}`)*\n"
+    try:
+        if query.data == "btn_ventas_hoy":
+            cnt, total = ventas_hoy_sync()
+            if cnt == 0:
+                msg = "ℹ️ **No se encontraron ventas registradas en el día de hoy.**"
+            else:
+                msg = (
+                    f"📊 **Ventas del Día de Hoy**\n\n"
+                    f"🔢 **Transacciones:** {cnt}\n"
+                    f"💰 **Total Recaudado:** `{formatear_cop(total)}`"
                 )
+            await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+
+        elif query.data == "btn_ventas_semana":
+            dias, totales = ventas_semana_sync()
             
-            mensaje.append("\n📊 **Resumen General:**\n")
-            mensaje.append(f"🔢 **Transacciones:** {cnt}")
-            mensaje.append(f"💵 **Total Contado:** `{formatear_cop(contado)}`")
-            mensaje.append(f"💳 **Total Crédito:** `{formatear_cop(credito)}`")
-            mensaje.append(f"💰 **Recaudación Total:** `{formatear_cop(total)}`")
-            mensaje.append(f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`")
+            if not totales or totales[0] == 0:
+                msg_final = "ℹ️ **No se encontraron ventas registradas en lo que va de esta semana.**"
+            else:
+                cnt, total, contado, credito, ganancia = totales
+                mensaje = ["📅 **Balance de la Semana**\n"]
+                mensaje.append("📆 **Desglose Diario:**\n")
+                
+                for fecha, dia_nombre, total_dia, contado_dia, credito_dia in dias:
+                    dia_clean = dia_nombre.strip().capitalize()
+                    fecha_str = fecha.strftime('%d/%m')
+                    mensaje.append(
+                        f"🔹 **{dia_clean}** ({fecha_str})\n"
+                        f"   └ Total: `{formatear_cop(total_dia)}`  *(💵 `{formatear_cop(contado_dia)}` | 💳 `{formatear_cop(credito_dia)}`)*\n"
+                    )
+                
+                mensaje.append("\n📊 **Resumen General:**\n")
+                mensaje.append(f"🔢 **Transacciones:** {cnt}")
+                mensaje.append(f"💵 **Total Contado:** `{formatear_cop(contado)}`")
+                mensaje.append(f"💳 **Total Crédito:** `{formatear_cop(credito)}`")
+                mensaje.append(f"💰 **Recaudación Total:** `{formatear_cop(total)}`")
+                mensaje.append(f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`")
 
-            msg_final = "\n".join(mensaje)
-        await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+                msg_final = "\n".join(mensaje)
+            await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
-    elif query.data == "btn_valorizacion":
-        costo, venta = await asyncio.to_thread(valorizacion_sync)
-        if costo == 0 and venta == 0:
-            msg = "ℹ️ **No se encontraron productos registrados en inventario para calcular la valorización.**"
-        else:
-            msg = (
-                f"🏢 **Valorización de Bodega**\n\n"
-                f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
-                f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`"
-            )
-        await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+        elif query.data == "btn_valorizacion":
+            costo, venta = valorizacion_sync()
+            if costo == 0 and venta == 0:
+                msg = "ℹ️ **No se encontraron productos registrados en inventario para calcular la valorización.**"
+            else:
+                msg = (
+                    f"🏢 **Valorización de Bodega**\n\n"
+                    f"💵 **Costo Invertido:** `{formatear_cop(costo)}`\n"
+                    f"📈 **Valor Potencial de Venta:** `{formatear_cop(venta)}`"
+                )
+            await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
-    elif query.data == "btn_stock_bajo":
-        filas = await asyncio.to_thread(stock_bajo_sync)
-        if not filas:
-            await query.message.reply_text("✅ **No se encontraron productos de Maquillaje agotados. ¡Tu stock está al día!**", reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
-        else:
-            lineas = ["🚫 **Productos de Maquillaje Agotados (0 uds.)**\n"]
-            for n, s in filas:
-                lineas.append(f"• **{n}**")
-            await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+        elif query.data == "btn_stock_bajo":
+            filas = stock_bajo_sync()
+            if not filas:
+                await query.message.reply_text("✅ **No se encontraron productos de Maquillaje agotados. ¡Tu stock está al día!**", reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+            else:
+                lineas = ["🚫 **Productos de Maquillaje Agotados (0 uds.)**\n"]
+                for n, s in filas:
+                    lineas.append(f"• **{n}**")
+                await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
-    elif query.data == "btn_reporte_pdf":
-        msg_espera = await query.message.reply_text("🔄 Consultando base de datos...")
-        pdf_buffer = await asyncio.to_thread(generar_pdf_mes_sync)
-        
-        if pdf_buffer is None:
-            await msg_espera.edit_text("ℹ️ **No se encontraron ventas registradas durante este mes para generar el PDF.**", parse_mode="Markdown")
-        else:
-            await msg_espera.edit_text("🔄 Generando reporte PDF del mes...")
-            await context.bot.send_document(
-                chat_id=query.message.chat_id,
-                document=pdf_buffer, 
-                filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf",
-                caption="📄 Aquí tienes tu reporte PDF del mes listo para consultar."
-            )
-            await msg_espera.delete()
+        elif query.data == "btn_reporte_pdf":
+            pdf_buffer = generar_pdf_mes_sync()
+            
+            if pdf_buffer is None:
+                await query.message.reply_text("ℹ️ **No se encontraron ventas registradas durante este mes para generar el PDF.**", parse_mode="Markdown")
+            else:
+                await query.message.reply_document(
+                    document=pdf_buffer, 
+                    filename=f"Reporte_Soulceron_{datetime.now().strftime('%m_%Y')}.pdf",
+                    caption="📄 Aquí tienes tu reporte PDF del mes listo para consultar."
+                )
 
-    elif query.data == "btn_ayuda":
-        await ayuda(update, context)
+        elif query.data == "btn_ayuda":
+            await ayuda(update, context)
+
+    except Exception as e:
+        logging.error(f"Error en callback: {e}")
+        await query.message.reply_text(f"🔴 **Error al procesar la solicitud:** {str(e)}")
 
 # -------------------------------------------------------------------
 # TAREAS AUTOMÁTICAS PROGRAMADAS
@@ -493,6 +487,7 @@ def tarea_cierre_diario():
                 async with ptb_app:
                     await ptb_app.bot.send_message(chat_id=CHAT_ID_ADMIN, text=msg, parse_mode="Markdown")
             
+            import asyncio
             asyncio.run(send())
         except Exception as e:
             logging.error(f"Error en cierre diario automático: {e}")
@@ -530,6 +525,7 @@ def webhook():
                 update = Update.de_json(json_data, ptb_app.bot)
                 await ptb_app.process_update(update)
 
+        import asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
