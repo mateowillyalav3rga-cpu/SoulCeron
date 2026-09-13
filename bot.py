@@ -184,7 +184,7 @@ def valorizacion_sync():
     return res[0] or 0, res[1] or 0
 
 # -------------------------------------------------------------------
-# CONSULTA DE CLIENTE (/cliente) USANDO LA VISTA SEGMENTADA
+# CONSULTA DE CLIENTE (/cliente)
 # -------------------------------------------------------------------
 async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -261,7 +261,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1. Verificar productos
         productos_encontrados = []
         productos_no_encontrados = []
 
@@ -302,7 +301,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\n".join(lineas_error), parse_mode="Markdown")
             return
 
-        # 2. Verificar o Insertar Cliente (Detectar si es nuevo)
         query_check_cliente = "SELECT id_cliente FROM clientes WHERE LOWER(nombre) LIKE LOWER(%s) LIMIT 1;"
         cur.execute(query_check_cliente, (f'%{cliente_nombre}%',))
         res_c = cur.fetchone()
@@ -316,7 +314,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             id_cliente = cur.fetchone()[0]
             etiqueta_cliente = "✨ `[NUEVO CLIENTE]`"
 
-        # 3. Crear Venta
         query_nueva_venta = "INSERT INTO ventas (id_cliente, tipo_pago) VALUES (%s, %s) RETURNING id_venta;"
         cur.execute(query_nueva_venta, (id_cliente, tipo_pago))
         id_venta = cur.fetchone()[0]
@@ -557,7 +554,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"🔴 **Error al procesar la solicitud:** {str(e)}")
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS PROGRAMADAS
+# TAREAS AUTOMÁTICAS PROGRAMADAS (MULTIUSUARIO)
 # -------------------------------------------------------------------
 def tarea_cierre_diario():
     if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
@@ -572,15 +569,53 @@ def tarea_cierre_diario():
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 async with ptb_app:
-                    await ptb_app.bot.send_message(chat_id=CHAT_ID_ADMIN, text=msg, parse_mode="Markdown")
+                    admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
+                    for admin_id in admins:
+                        try:
+                            await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                        except Exception as ex:
+                            logging.error(f"Error enviando a admin {admin_id}: {ex}")
             
             import asyncio
             asyncio.run(send())
         except Exception as e:
             logging.error(f"Error en cierre diario automático: {e}")
 
+def tarea_cierre_semanal():
+    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
+        try:
+            dias, totales = ventas_semana_sync()
+            cnt, total, contado, credito, ganancia = totales
+            
+            msg = (
+                f"📊 **BALANCE AUTOMÁTICO SEMANAL (DOMINGO 8:00 PM)** 📊\n\n"
+                f"🔢 **Transacciones Semana:** {cnt}\n"
+                f"💵 **Total Contado:** `{formatear_cop(contado)}`\n"
+                f"💳 **Total Crédito:** `{formatear_cop(credito)}`\n"
+                f"💰 **Recaudación Total:** `{formatear_cop(total)}`\n"
+                f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`"
+            )
+            
+            async def send():
+                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+                async with ptb_app:
+                    admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
+                    for admin_id in admins:
+                        try:
+                            await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                        except Exception as ex:
+                            logging.error(f"Error enviando a admin {admin_id}: {ex}")
+            
+            import asyncio
+            asyncio.run(send())
+        except Exception as e:
+            logging.error(f"Error en cierre semanal automático: {e}")
+
 scheduler = BackgroundScheduler()
+# Cierre Diario a las 7:00 PM (19:00 hrs)
 scheduler.add_job(tarea_cierre_diario, 'cron', hour=19, minute=0)
+# Cierre Semanal todos los domingos a las 8:00 PM (20:00 hrs)
+scheduler.add_job(tarea_cierre_semanal, 'cron', day_of_week='sun', hour=20, minute=0)
 scheduler.start()
 
 # -------------------------------------------------------------------
