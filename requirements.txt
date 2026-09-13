@@ -2,3 +2,5 @@ python-telegram-bot>=21.1.1
 psycopg2-binary==2.9.9
 Flask==3.0.2
 gunicorn==21.2.0
+reportlab
+apscheduler
