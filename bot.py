@@ -96,7 +96,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text(mensaje, reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
 
 # -------------------------------------------------------------------
-# LÓGICA DE CONSULTAS SQL (CORREGIDAS A v.fecha)
+# LÓGICA DE CONSULTAS SQL
 # -------------------------------------------------------------------
 def ventas_hoy_sync():
     query = """
@@ -182,6 +182,51 @@ def valorizacion_sync():
     cur.close()
     conn.close()
     return res[0] or 0, res[1] or 0
+
+# -------------------------------------------------------------------
+# CONSULTA DE CLIENTE (/cliente)
+# -------------------------------------------------------------------
+async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ **Indica el nombre del cliente.** Usa:\n`/cliente Nombre`", parse_mode="Markdown")
+        return
+
+    nombre_buscar = " ".join(args).strip()
+    query = f"""
+    SELECT 
+        c.nombre,
+        COUNT(DISTINCT v.id_venta) AS total_compras,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito
+    FROM clientes c
+    LEFT JOIN ventas v ON c.id_cliente = v.id_cliente
+    LEFT JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
+    WHERE LOWER(c.nombre) LIKE LOWER('%{nombre_buscar}%')
+    GROUP BY c.id_cliente, c.nombre
+    LIMIT 1;
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(query)
+        res = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not res or res[0] is None:
+            await update.message.reply_text(f"🔍 **No se encontró ningún cliente registrado con el nombre** `{nombre_buscar}`.", parse_mode="Markdown")
+            return
+
+        msg = (
+            f"👤 **Perfil de Cliente:** {res[0]}\n\n"
+            f"🛍️ **Compras Realizadas:** {res[1]}\n"
+            f"💵 **Total Comprado a Contado:** `{formatear_cop(res[2])}`\n"
+            f"💳 **Total Comprado a Crédito:** `{formatear_cop(res[3])}`"
+        )
+        await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"🔴 **Error al consultar cliente:** {str(e)}")
 
 # -------------------------------------------------------------------
 # REGISTRO DE VENTAS Y COMPRAS
@@ -321,7 +366,7 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **Error al registrar compra:** {str(e)}")
 
 # -------------------------------------------------------------------
-# GENERADOR DE PDF MENSUAL (CORREGIDO A v.fecha)
+# GENERADOR DE PDF MENSUAL
 # -------------------------------------------------------------------
 def generar_pdf_mes_sync():
     query = """
@@ -511,15 +556,19 @@ def webhook():
         async def process():
             ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
             
+            # Registro de Comandos de Telegram
             ptb_app.add_handler(CommandHandler("start", start))
             ptb_app.add_handler(CommandHandler("menu", start))
             ptb_app.add_handler(CommandHandler("ayuda", ayuda))
             ptb_app.add_handler(CommandHandler("venta", registrar_venta))
             ptb_app.add_handler(CommandHandler("compra", registrar_compra))
+            ptb_app.add_handler(CommandHandler("cliente", consultar_cliente))
             
+            # Registro de Callbacks y Filtros de Texto
             ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
             ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
             ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/compra"), registrar_compra))
+            ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/cliente"), consultar_cliente))
 
             async with ptb_app:
                 update = Update.de_json(json_data, ptb_app.bot)
