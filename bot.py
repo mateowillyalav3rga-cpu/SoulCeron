@@ -184,7 +184,7 @@ def valorizacion_sync():
     return res[0] or 0, res[1] or 0
 
 # -------------------------------------------------------------------
-# CONSULTA DE CLIENTE (/cliente)
+# CONSULTA DE CLIENTE (/cliente) USANDO LA VISTA SEGMENTADA
 # -------------------------------------------------------------------
 async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -195,15 +195,15 @@ async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre_buscar = " ".join(args).strip()
     query = f"""
     SELECT 
-        c.nombre,
-        COUNT(DISTINCT v.id_venta) AS total_compras,
-        COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
-        COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito
-    FROM clientes c
-    LEFT JOIN ventas v ON c.id_cliente = v.id_cliente
-    LEFT JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE LOWER(c.nombre) LIKE LOWER('%{nombre_buscar}%')
-    GROUP BY c.id_cliente, c.nombre
+        nombre,
+        total_compras,
+        total_contado,
+        total_credito,
+        categoria_calculada,
+        ultima_compra,
+        dias_sin_comprar
+    FROM vista_clientes_segmentados
+    WHERE LOWER(nombre) LIKE LOWER('%{nombre_buscar}%')
     LIMIT 1;
     """
     try:
@@ -218,18 +218,26 @@ async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔍 **No se encontró ningún cliente registrado con el nombre** `{nombre_buscar}`.", parse_mode="Markdown")
             return
 
+        nombre_cl, compras, contado, credito, categoria, ult_compra, dias_sin = res
+
+        ult_compra_str = ult_compra.strftime('%d/%m/%Y') if ult_compra else "Sin compras previas"
+        dias_str = f"{int(dias_sin)} días" if dias_sin is not None else "N/A"
+
         msg = (
-            f"👤 **Perfil de Cliente:** {res[0]}\n\n"
-            f"🛍️ **Compras Realizadas:** {res[1]}\n"
-            f"💵 **Total Comprado a Contado:** `{formatear_cop(res[2])}`\n"
-            f"💳 **Total Comprado a Crédito:** `{formatear_cop(res[3])}`"
+            f"👤 **Perfil de Cliente:** {nombre_cl}\n"
+            f"🏷️ **Segmento:** `{categoria}`\n\n"
+            f"🛍️ **Compras Realizadas:** {compras}\n"
+            f"💵 **Total Contado:** `{formatear_cop(contado)}`\n"
+            f"💳 **Total Crédito:** `{formatear_cop(credito)}`\n\n"
+            f"📅 **Última Compra:** {ult_compra_str}\n"
+            f"⏳ **Tiempo Transcurrido:** `{dias_str}`"
         )
         await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"🔴 **Error al consultar cliente:** {str(e)}")
 
 # -------------------------------------------------------------------
-# REGISTRO DE VENTAS (/venta) CON VERIFICACIÓN DE EXISTENCIA
+# REGISTRO DE VENTAS (/venta)
 # -------------------------------------------------------------------
 async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
@@ -253,7 +261,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1. Verificar qué productos existen y cuáles no
+        # 1. Verificar productos
         productos_encontrados = []
         productos_no_encontrados = []
 
@@ -284,7 +292,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 productos_no_encontrados.append(prod_clean)
 
-        # Si hay productos no encontrados, abortamos la venta y notificamos
         if productos_no_encontrados:
             cur.close()
             conn.close()
@@ -295,22 +302,21 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\n".join(lineas_error), parse_mode="Markdown")
             return
 
-        # 2. Si todos existen, procedemos con la inserción de la venta
-        query_cliente = """
-        WITH cliente_existente AS (
-            SELECT id_cliente FROM clientes WHERE LOWER(nombre) LIKE LOWER(%s) LIMIT 1
-        ),
-        cliente_creado AS (
-            INSERT INTO clientes (nombre)
-            SELECT %s
-            WHERE NOT EXISTS (SELECT 1 FROM cliente_existente)
-            RETURNING id_cliente
-        )
-        SELECT id_cliente FROM cliente_existente UNION ALL SELECT id_cliente FROM cliente_creado LIMIT 1;
-        """
-        cur.execute(query_cliente, (f'%{cliente_nombre}%', cliente_nombre))
-        id_cliente = cur.fetchone()[0]
+        # 2. Verificar o Insertar Cliente (Detectar si es nuevo)
+        query_check_cliente = "SELECT id_cliente FROM clientes WHERE LOWER(nombre) LIKE LOWER(%s) LIMIT 1;"
+        cur.execute(query_check_cliente, (f'%{cliente_nombre}%',))
+        res_c = cur.fetchone()
 
+        if res_c:
+            id_cliente = res_c[0]
+            etiqueta_cliente = "👤 `[CLIENTE REGISTRADO]`"
+        else:
+            query_add_cliente = "INSERT INTO clientes (nombre) VALUES (%s) RETURNING id_cliente;"
+            cur.execute(query_add_cliente, (cliente_nombre,))
+            id_cliente = cur.fetchone()[0]
+            etiqueta_cliente = "✨ `[NUEVO CLIENTE]`"
+
+        # 3. Crear Venta
         query_nueva_venta = "INSERT INTO ventas (id_cliente, tipo_pago) VALUES (%s, %s) RETURNING id_venta;"
         cur.execute(query_nueva_venta, (id_cliente, tipo_pago))
         id_venta = cur.fetchone()[0]
@@ -325,7 +331,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """
             cur.execute(query_detalle, (id_venta, item['id_producto'], item['cantidad'], item['precio_unitario']))
             
-            # Actualizar stock del producto
             query_descuento = "UPDATE productos SET stock_actual = stock_actual - %s WHERE id_producto = %s;"
             cur.execute(query_descuento, (item['cantidad'], item['id_producto']))
 
@@ -338,7 +343,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = (
             f"🎉 **¡Venta #{id_venta} Registrada Exitosamente!** 🎉\n\n"
-            f"👤 **Cliente:** {cliente_nombre}\n"
+            f"👤 **Cliente:** {cliente_nombre} {etiqueta_cliente}\n"
             f"💳 **Método de Pago:** {tipo_pago.capitalize()}\n\n"
             f"📋 **Productos Procesados:**\n" + "\n".join(lista_detalles_msg) + "\n\n"
             f"💰 **TOTAL COBRADO:** `{formatear_cop(total_venta)}`"
@@ -349,7 +354,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **Error al registrar venta:** {str(e)}")
 
 # -------------------------------------------------------------------
-# REGISTRO DE COMPRAS (/compra) CON DETECCIÓN DE NUEVOS REGISTROS
+# REGISTRO DE COMPRAS (/compra)
 # -------------------------------------------------------------------
 async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
@@ -370,7 +375,6 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
             costo = float(costo_str)
             precio = float(precio_str)
 
-            # Intentar actualizar producto existente
             query_update = """
             UPDATE productos 
             SET stock_actual = stock_actual + %s,
@@ -385,7 +389,6 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if res:
                 resúmenes.append(f"• **{res[0]}** `[REABASTECIDO]`\n   └ +{cant} uds. (Nuevo Stock: `{res[1]}`) | Costo: `{formatear_cop(costo)}` | Venta: `{formatear_cop(precio)}`")
             else:
-                # Si no existe, crearlo como NUEVO REGISTRO (Categoría 1 Maquillaje por defecto)
                 query_insert = """
                 INSERT INTO productos (nombre, stock_actual, costo_compra, precio_venta, id_categoria)
                 VALUES (%s, %s, %s, %s, 1)
