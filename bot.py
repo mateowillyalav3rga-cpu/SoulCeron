@@ -23,7 +23,7 @@ from telegram.ext import (
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -42,7 +42,6 @@ def obtener_lista_admins():
     if CHAT_ID_ADMIN:
         for cid in CHAT_ID_ADMIN.split(","):
             cid_clean = cid.strip().replace('"', '').replace("'", "")
-            # Ignorar el ID viejo (2074541555) si aún existe en variables de entorno de Render
             if cid_clean and cid_clean not in admins and cid_clean != "2074541555":
                 admins.append(cid_clean)
     return admins
@@ -935,8 +934,16 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"🔴 <b>Error al procesar la solicitud:</b> {str(e)}")
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS PROGRAMADAS (CON SINTAXIS HTML SEGUIRA)
+# TAREAS AUTOMÁTICAS PROGRAMADAS
 # -------------------------------------------------------------------
+def mantener_vivo():
+    """Hace una petición a la propia app para prevenir que Render entre en estado de suspensión."""
+    try:
+        urllib.request.urlopen("https://soulceron.onrender.com/", timeout=5)
+        logging.info("Ping de mantenimiento exitoso a Render.")
+    except Exception as e:
+        logging.error(f"Error en ping de mantenimiento: {e}")
+
 def tarea_saludo_manana():
     if TELEGRAM_TOKEN:
         try:
@@ -1039,17 +1046,20 @@ def tarea_cierre_mensual_automatico():
 # Inicialización con zona horaria oficial de Colombia
 scheduler = BackgroundScheduler(timezone=COLOMBIA_TZ)
 
-# Saludo de la mañana a las 7:00 AM
-scheduler.add_job(tarea_saludo_manana, 'cron', hour=7, minute=0)
+# Keep-Alive cada 10 minutos para evitar suspensión de Render
+scheduler.add_job(mantener_vivo, 'interval', minutes=10)
 
-# Cierre Diario a las 7:00 PM (19:00 hrs)
-scheduler.add_job(tarea_cierre_diario, 'cron', hour=19, minute=0)
+# Saludo de la mañana a las 7:00 AM (Hora Colombia)
+scheduler.add_job(tarea_saludo_manana, 'cron', hour=7, minute=0, timezone=COLOMBIA_TZ)
 
-# Cierre Semanal todos los domingos a las 8:00 PM (20:00 hrs)
-scheduler.add_job(tarea_cierre_semanal, 'cron', day_of_week='sun', hour=20, minute=0)
+# Cierre Diario a las 7:00 PM / 19:00 hrs (Hora Colombia)
+scheduler.add_job(tarea_cierre_diario, 'cron', hour=19, minute=0, timezone=COLOMBIA_TZ)
 
-# Cierre Mensual el día 1 de cada mes a las 8:00 AM
-scheduler.add_job(tarea_cierre_mensual_automatico, 'cron', day=1, hour=8, minute=0)
+# Cierre Semanal todos los domingos a las 8:00 PM / 20:00 hrs (Hora Colombia)
+scheduler.add_job(tarea_cierre_semanal, 'cron', day_of_week='sun', hour=20, minute=0, timezone=COLOMBIA_TZ)
+
+# Cierre Mensual el día 1 de cada mes a las 8:00 AM (Hora Colombia)
+scheduler.add_job(tarea_cierre_mensual_automatico, 'cron', day=1, hour=8, minute=0, timezone=COLOMBIA_TZ)
 
 scheduler.start()
 
