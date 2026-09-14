@@ -510,8 +510,75 @@ async def probar_notificaciones(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("✅ <b>Prueba ejecutada exitosamente.</b> Revisa los chats.")
 
 # -------------------------------------------------------------------
-# GENERADORES DE PDF (MENSUAL, SEMANAL, BODEGA Y AGOTADOS)
+# GENERADORES DE PDF (DIARIO, MENSUAL, SEMANAL, BODEGA Y AGOTADOS)
 # -------------------------------------------------------------------
+def generar_pdf_dia_sync():
+    query = """
+    SELECT v.id_venta, v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota' AS fecha, c.nombre AS cliente, v.tipo_pago, p.nombre AS producto, dv.cantidad, dv.precio_unitario, (dv.cantidad * dv.precio_unitario) AS subtotal
+    FROM ventas v
+    JOIN clientes c ON v.id_cliente = c.id_cliente
+    JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
+    JOIN productos p ON dv.id_producto = p.id_producto
+    WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota') = DATE(CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')
+    ORDER BY v.fecha ASC;
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(query)
+    detalles = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not detalles:
+        return None
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    styles = getSampleStyleSheet()
+
+    titulo_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, textColor=colors.HexColor('#880E4F'), spaceAfter=8)
+    sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.gray, spaceAfter=15)
+
+    now_co = datetime.now(COLOMBIA_TZ)
+    elements = [
+        Paragraph("Soulcerón - Reporte Diario de Ventas", titulo_style),
+        Paragraph(f"Cierre de Día - Generado el: {now_co.strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
+    ]
+
+    tabla_data = [["ID", "Hora", "Cliente", "Pago", "Producto", "Cant", "Subtotal"]]
+    grand_total = 0
+
+    for id_v, fecha, cl, pago, prod, cant, precio, subtotal in detalles:
+        grand_total += subtotal
+        tabla_data.append([
+            str(id_v), 
+            fecha.strftime('%H:%M'), 
+            str(cl), 
+            str(pago).capitalize(), 
+            str(prod), 
+            str(cant), 
+            formatear_cop(subtotal)
+        ])
+
+    tabla_data.append(["", "", "", "", "", "TOTAL:", formatear_cop(grand_total)])
+
+    t = Table(tabla_data, colWidths=[35, 55, 120, 60, 150, 35, 85])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F8BBD0')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#880E4F')),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E0E0E0')),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#F5F5F5')),
+    ]))
+
+    elements.append(t)
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
 def generar_pdf_mes_sync(mes_offset=0):
     query = """
     SELECT v.id_venta, v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota' AS fecha, c.nombre AS cliente, v.tipo_pago, SUM(dv.cantidad * dv.precio_unitario) AS total
@@ -865,7 +932,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"🔴 <b>Error al procesar la solicitud:</b> {str(e)}")
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS PROGRAMADAS (CON SINTAXIS HTML SEGUIRA)
+# TAREAS AUTOMÁTICAS PROGRAMADAS (CON PDF EN CIERRE DIARIO)
 # -------------------------------------------------------------------
 def tarea_saludo_manana():
     if TELEGRAM_TOKEN:
@@ -888,11 +955,23 @@ def tarea_cierre_diario():
             msg = (
                 f"🔔 <b>Cierre de Caja Automático (7:00 PM)</b> 🔔\n\n"
                 f"🔢 <b>Ventas realizadas hoy:</b> {cnt}\n"
-                f"💰 <b>Total recaudado:</b> <code>{formatear_cop(total)}</code>"
+                f"💰 <b>Total recaudado:</b> <code>{formatear_cop(total)}</code>\n\n"
+                f"📄 <i>Adjunto encontrarás el reporte PDF con el desglose del día.</i>"
             )
+            pdf_buffer = generar_pdf_dia_sync()
+            now_co = datetime.now(COLOMBIA_TZ)
             admins = obtener_lista_admins()
+
             for admin_id in admins:
                 enviar_mensaje_api(admin_id, msg)
+                if pdf_buffer:
+                    pdf_buffer.seek(0)
+                    enviar_documento_api(
+                        admin_id,
+                        pdf_buffer,
+                        f"Reporte_Diario_{now_co.strftime('%d_%m_%Y')}.pdf",
+                        "📄 Reporte PDF Diario"
+                    )
         except Exception as e:
             logging.error(f"Error en cierre diario automático: {e}")
 
