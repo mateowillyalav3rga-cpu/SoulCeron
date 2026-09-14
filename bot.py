@@ -126,7 +126,7 @@ def formatear_cop(monto):
     return f"${monto:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
 # -------------------------------------------------------------------
-# MENÚ CON BOTONES INTERACTIVOS
+# MENÚ CON BOTONES INTERACTIVOS Y DETECCIÓN DE ID
 # -------------------------------------------------------------------
 def obtener_teclado_menu():
     keyboard = [
@@ -146,8 +146,10 @@ def obtener_teclado_menu():
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     msg = (
-        "✨ <b>¡Hola! Bienvenido al asistente de Soulcerón</b> ✨\n\n"
+        f"✨ <b>¡Hola! Bienvenido al asistente de Soulcerón</b> ✨\n\n"
+        f"📱 <b>Tu ID de Chat:</b> <code>{chat_id}</code>\n\n"
         "Estoy listo para ayudarte a gestionar tus ventas, inventario y finanzas.\n\n"
         "👇 <i>Selecciona una opción del menú para comenzar:</i>"
     )
@@ -932,7 +934,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"🔴 <b>Error al procesar la solicitud:</b> {str(e)}")
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS PROGRAMADAS (CON PDF EN CIERRE DIARIO)
+# TAREAS AUTOMÁTICAS PROGRAMADAS (CON SINTAXIS HTML SEGUIRA)
 # -------------------------------------------------------------------
 def tarea_saludo_manana():
     if TELEGRAM_TOKEN:
