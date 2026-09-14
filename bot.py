@@ -33,8 +33,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")
 
-# IDs de administradores (Tu ID y el de tu esposa)
-ID_ESPOSA = "2074541555"
+# IDs de administradores (Tu ID y el ID corregido de tu esposa)
+ID_ESPOSA = "2059542689"
 ID_ESPOSO = "5197161394"
 
 def obtener_lista_admins():
