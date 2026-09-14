@@ -30,6 +30,19 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")
 
+# IDs de administradores (Tu ID y el de tu esposa)
+ID_ESPOSA = "2074541555"
+ID_ESPOSO = "5197161394"
+
+def obtener_lista_admins():
+    admins = [ID_ESPOSO, ID_ESPOSA]
+    if CHAT_ID_ADMIN:
+        for cid in CHAT_ID_ADMIN.split(","):
+            cid_clean = cid.strip().replace('"', '').replace("'", "")
+            if cid_clean and cid_clean not in admins:
+                admins.append(cid_clean)
+    return admins
+
 COLOMBIA_TZ = ZoneInfo('America/Bogota')
 
 web_app = Flask(__name__)
@@ -422,11 +435,12 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # COMANDO DE PRUEBA DE NOTIFICACIONES
 # -------------------------------------------------------------------
 async def probar_notificaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🧪 **Iniciando prueba de notificaciones automáticas...**")
+    admins = obtener_lista_admins()
+    await update.message.reply_text(f"🧪 **Iniciando prueba de notificaciones automáticas...**\nIDs destino: `{admins}`", parse_mode="Markdown")
     tarea_saludo_manana()
     tarea_cierre_diario()
     tarea_cierre_semanal()
-    await update.message.reply_text("✅ **Prueba enviada.** Revisa si ambos recibieron el saludo y los reportes.")
+    await update.message.reply_text("✅ **Prueba finalizada.** Por favor revisa ambos teléfonos.")
 
 # -------------------------------------------------------------------
 # GENERADORES DE PDF (MENSUAL, SEMANAL, BODEGA Y AGOTADOS)
@@ -787,20 +801,20 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TAREAS AUTOMÁTICAS PROGRAMADAS (CON SALUDO PERSONALIZADO)
 # -------------------------------------------------------------------
 def tarea_saludo_manana():
-    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
+    if TELEGRAM_TOKEN:
         try:
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 async with ptb_app:
-                    admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
+                    admins = obtener_lista_admins()
                     for admin_id in admins:
-                        if admin_id == "2074541555":
+                        if str(admin_id) == ID_ESPOSA:
                             msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy, **Mi barrigona hermosa** 💖✨"
                         else:
                             msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy 💪✨"
                         
                         try:
-                            await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                            await ptb_app.bot.send_message(chat_id=int(admin_id), text=msg, parse_mode="Markdown")
                         except Exception as ex:
                             logging.error(f"Error enviando saludo a admin {admin_id}: {ex}")
             
@@ -810,7 +824,7 @@ def tarea_saludo_manana():
             logging.error(f"Error en saludo de la mañana: {e}")
 
 def tarea_cierre_diario():
-    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
+    if TELEGRAM_TOKEN:
         try:
             cnt, total = ventas_hoy_sync()
             msg = (
@@ -822,10 +836,10 @@ def tarea_cierre_diario():
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 async with ptb_app:
-                    admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
+                    admins = obtener_lista_admins()
                     for admin_id in admins:
                         try:
-                            await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                            await ptb_app.bot.send_message(chat_id=int(admin_id), text=msg, parse_mode="Markdown")
                         except Exception as ex:
                             logging.error(f"Error enviando a admin {admin_id}: {ex}")
             
@@ -835,7 +849,7 @@ def tarea_cierre_diario():
             logging.error(f"Error en cierre diario automático: {e}")
 
 def tarea_cierre_semanal():
-    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
+    if TELEGRAM_TOKEN:
         try:
             dias, totales = ventas_semana_sync()
             cnt, total, contado, credito, ganancia = totales
@@ -855,14 +869,14 @@ def tarea_cierre_semanal():
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 async with ptb_app:
-                    admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
+                    admins = obtener_lista_admins()
                     for admin_id in admins:
                         try:
-                            await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                            await ptb_app.bot.send_message(chat_id=int(admin_id), text=msg, parse_mode="Markdown")
                             if pdf_buffer:
                                 pdf_buffer.seek(0)
                                 await ptb_app.bot.send_document(
-                                    chat_id=admin_id,
+                                    chat_id=int(admin_id),
                                     document=pdf_buffer,
                                     filename=f"Reporte_Semanal_{now_co.strftime('%d_%m_%Y')}.pdf"
                                 )
@@ -875,7 +889,7 @@ def tarea_cierre_semanal():
             logging.error(f"Error en cierre semanal automático: {e}")
 
 def tarea_cierre_mensual_automatico():
-    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
+    if TELEGRAM_TOKEN:
         try:
             pdf_buffer = generar_pdf_mes_sync(mes_offset=1)
             msg = "📈 **REPORTE AUTOMÁTICO MENSUAL** 📈\n\n📄 Adjunto encontrarás el PDF consolidado con todas las ventas del mes anterior."
@@ -884,19 +898,19 @@ def tarea_cierre_mensual_automatico():
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 async with ptb_app:
-                    admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
+                    admins = obtener_lista_admins()
                     for admin_id in admins:
                         try:
-                            await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                            await ptb_app.bot.send_message(chat_id=int(admin_id), text=msg, parse_mode="Markdown")
                             if pdf_buffer:
                                 pdf_buffer.seek(0)
                                 await ptb_app.bot.send_document(
-                                    chat_id=admin_id,
+                                    chat_id=int(admin_id),
                                     document=pdf_buffer,
                                     filename=f"Reporte_Mensual_Anterior_{now_co.strftime('%m_%Y')}.pdf"
                                 )
                             else:
-                                await ptb_app.bot.send_message(chat_id=admin_id, text="ℹ️ *No se registraron ventas en el mes anterior.*", parse_mode="Markdown")
+                                await ptb_app.bot.send_message(chat_id=int(admin_id), text="ℹ️ *No se registraron ventas en el mes anterior.*", parse_mode="Markdown")
                         except Exception as ex:
                             logging.error(f"Error enviando reporte mensual a {admin_id}: {ex}")
 
