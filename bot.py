@@ -810,7 +810,7 @@ def generar_pdf_agotados_sync():
     return buffer
 
 # -------------------------------------------------------------------
-# HANDLER DE BOTONES (CALLBACK QUERY)
+# HANDLER DE BOTONES (ORDEN CORREGIDO: 1. RESUMEN -> 2. PDF -> 3. MENÚ)
 # -------------------------------------------------------------------
 async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -827,14 +827,16 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🔢 <b>Transacciones:</b> {cnt}\n"
                     f"💰 <b>Total Recaudado:</b> <code>{formatear_cop(total)}</code>"
                 )
-            await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+            await query.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="HTML")
+            await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
         elif query.data == "btn_ventas_semana":
             dias, totales = ventas_semana_sync()
             
             if not totales or totales[0] == 0:
                 msg_final = "ℹ️ <b>No se encontraron ventas registradas en lo que va de esta semana.</b>"
-                await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+                await query.message.reply_text(enviar_mensaje_seguro(msg_final), parse_mode="HTML")
+                await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
             else:
                 cnt, total, contado, credito, ganancia = totales
                 mensaje = ["📅 <b>Balance de la Semana</b>\n"]
@@ -858,22 +860,27 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 msg_final = "\n".join(mensaje)
                 pdf_buffer = generar_pdf_semana_sync()
-
                 now_co = datetime.now(COLOMBIA_TZ)
-                await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+
+                # 1. Resumen
+                await query.message.reply_text(enviar_mensaje_seguro(msg_final), parse_mode="HTML")
+                # 2. PDF
                 if pdf_buffer:
                     pdf_buffer.seek(0)
                     await query.message.reply_document(
                         document=pdf_buffer,
                         filename=f"Balance_Semanal_{now_co.strftime('%d_%m_%Y')}.pdf"
                     )
+                # 3. Menú
+                await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
         elif query.data == "btn_valorizacion":
             costo, venta = valorizacion_sync()
             ganancia_est = venta - costo
             if costo == 0 and venta == 0:
                 msg = "ℹ️ <b>No se encontraron productos registrados en inventario para calcular la valorización.</b>"
-                await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+                await query.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="HTML")
+                await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
             else:
                 msg = (
                     f"🏢 <b>Valorización de Bodega</b>\n\n"
@@ -884,18 +891,24 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 pdf_buffer = generar_pdf_valorizacion_sync()
                 now_co = datetime.now(COLOMBIA_TZ)
-                await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+
+                # 1. Resumen
+                await query.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="HTML")
+                # 2. PDF
                 if pdf_buffer:
                     pdf_buffer.seek(0)
                     await query.message.reply_document(
                         document=pdf_buffer,
                         filename=f"Valorizacion_Bodega_{now_co.strftime('%d_%m_%Y')}.pdf"
                     )
+                # 3. Menú
+                await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
         elif query.data == "btn_stock_bajo":
             filas = stock_bajo_sync()
             if not filas:
-                await query.message.reply_text("✅ <b>No se encontraron productos agotados. ¡Tu stock está al día!</b>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+                await query.message.reply_text("✅ <b>No se encontraron productos agotados. ¡Tu stock está al día!</b>", parse_mode="HTML")
+                await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
             else:
                 lineas = [
                     "🚫 <b>Productos Totalmente Agotados (0 uds.)</b>\n",
@@ -906,13 +919,18 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 pdf_buffer = generar_pdf_agotados_sync()
                 now_co = datetime.now(COLOMBIA_TZ)
-                await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+
+                # 1. Resumen
+                await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), parse_mode="HTML")
+                # 2. PDF
                 if pdf_buffer:
                     pdf_buffer.seek(0)
                     await query.message.reply_document(
                         document=pdf_buffer,
                         filename=f"Productos_Agotados_{now_co.strftime('%d_%m_%Y')}.pdf"
                     )
+                # 3. Menú
+                await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
         elif query.data == "btn_reporte_pdf":
             pdf_buffer = generar_pdf_mes_sync(mes_offset=0)
@@ -925,6 +943,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     filename=f"Reporte_Mes_{now_co.strftime('%m_%Y')}.pdf",
                     caption="📄 Aquí tienes tu reporte PDF del mes en curso."
                 )
+            await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
         elif query.data == "btn_ayuda":
             await ayuda(update, context)
@@ -937,7 +956,6 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TAREAS AUTOMÁTICAS PROGRAMADAS
 # -------------------------------------------------------------------
 def mantener_vivo():
-    """Hace una petición a la propia app para prevenir que Render entre en estado de suspensión."""
     try:
         urllib.request.urlopen("https://soulceron.onrender.com/", timeout=5)
         logging.info("Ping de mantenimiento exitoso a Render.")
@@ -1046,7 +1064,7 @@ def tarea_cierre_mensual_automatico():
 # Inicialización con zona horaria oficial de Colombia
 scheduler = BackgroundScheduler(timezone=COLOMBIA_TZ)
 
-# Keep-Alive cada 10 minutos para evitar suspensión de Render
+# Keep-Alive cada 10 minutos
 scheduler.add_job(mantener_vivo, 'interval', minutes=10)
 
 # Saludo de la mañana a las 7:00 AM (Hora Colombia)
