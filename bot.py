@@ -3,7 +3,7 @@ import re
 import io
 import logging
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,6 +17,8 @@ from telegram.ext import (
 )
 
 from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
+
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -27,6 +29,8 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")
+
+COLOMBIA_TZ = pytz.timezone('America/Bogota')
 
 web_app = Flask(__name__)
 
@@ -103,7 +107,7 @@ def ventas_hoy_sync():
     SELECT COUNT(DISTINCT v.id_venta) AS total_ventas, COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE DATE(v.fecha) = CURRENT_DATE;
+    WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota') = DATE(CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota');
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -116,15 +120,15 @@ def ventas_hoy_sync():
 def ventas_semana_sync():
     query_dias = """
     SELECT 
-        DATE(v.fecha) AS fecha,
-        TO_CHAR(v.fecha, 'TMDay') AS dia_nombre,
+        DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota') AS fecha,
+        TO_CHAR(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota', 'TMDay') AS dia_nombre,
         COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_dia,
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS contado_dia,
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS credito_dia
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE DATE_TRUNC('week', v.fecha) = DATE_TRUNC('week', CURRENT_DATE)
-    GROUP BY DATE(v.fecha), TO_CHAR(v.fecha, 'TMDay')
+    WHERE DATE_TRUNC('week', v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota') = DATE_TRUNC('week', CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')
+    GROUP BY DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota'), TO_CHAR(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota', 'TMDay')
     ORDER BY fecha ASC;
     """
     
@@ -138,7 +142,7 @@ def ventas_semana_sync():
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
     JOIN productos p ON dv.id_producto = p.id_producto
-    WHERE DATE_TRUNC('week', v.fecha) = DATE_TRUNC('week', CURRENT_DATE);
+    WHERE DATE_TRUNC('week', v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota') = DATE_TRUNC('week', CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota');
     """
     
     conn = get_db_connection()
@@ -419,11 +423,11 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------------------------------------------------
 def generar_pdf_mes_sync(mes_offset=0):
     query = """
-    SELECT v.id_venta, v.fecha, c.nombre AS cliente, v.tipo_pago, SUM(dv.cantidad * dv.precio_unitario) AS total
+    SELECT v.id_venta, v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota' AS fecha, c.nombre AS cliente, v.tipo_pago, SUM(dv.cantidad * dv.precio_unitario) AS total
     FROM ventas v
     JOIN clientes c ON v.id_cliente = c.id_cliente
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE DATE_TRUNC('month', v.fecha) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '%s month')
+    WHERE DATE_TRUNC('month', v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota') = DATE_TRUNC('month', CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota' - INTERVAL '%s month')
     GROUP BY v.id_venta, v.fecha, c.nombre, v.tipo_pago
     ORDER BY v.fecha ASC;
     """
@@ -444,9 +448,10 @@ def generar_pdf_mes_sync(mes_offset=0):
     titulo_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#D81B60'), spaceAfter=12)
     sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=10, textColor=colors.gray, spaceAfter=20)
 
+    now_co = datetime.now(COLOMBIA_TZ)
     elements = [
         Paragraph("Soulcerón - Reporte Mensual de Ventas", titulo_style),
-        Paragraph(f"Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
+        Paragraph(f"Generado el: {now_co.strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
     ]
 
     tabla_data = [["ID Venta", "Fecha", "Cliente", "Tipo Pago", "Total"]]
@@ -476,12 +481,12 @@ def generar_pdf_mes_sync(mes_offset=0):
 
 def generar_pdf_semana_sync():
     query = """
-    SELECT v.id_venta, v.fecha, c.nombre AS cliente, v.tipo_pago, p.nombre AS producto, dv.cantidad, dv.precio_unitario, (dv.cantidad * dv.precio_unitario) AS subtotal
+    SELECT v.id_venta, v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota' AS fecha, c.nombre AS cliente, v.tipo_pago, p.nombre AS producto, dv.cantidad, dv.precio_unitario, (dv.cantidad * dv.precio_unitario) AS subtotal
     FROM ventas v
     JOIN clientes c ON v.id_cliente = c.id_cliente
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
     JOIN productos p ON dv.id_producto = p.id_producto
-    WHERE DATE_TRUNC('week', v.fecha) = DATE_TRUNC('week', CURRENT_DATE)
+    WHERE DATE_TRUNC('week', v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota') = DATE_TRUNC('week', CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')
     ORDER BY v.fecha ASC;
     """
     conn = get_db_connection()
@@ -501,9 +506,10 @@ def generar_pdf_semana_sync():
     titulo_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, textColor=colors.HexColor('#880E4F'), spaceAfter=8)
     sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.gray, spaceAfter=15)
 
+    now_co = datetime.now(COLOMBIA_TZ)
     elements = [
         Paragraph("Soulcerón - Balance Semanal Detallado", titulo_style),
-        Paragraph(f"Semana en curso - Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
+        Paragraph(f"Semana en curso - Generado el: {now_co.strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
     ]
 
     tabla_data = [["ID", "Fecha", "Cliente", "Pago", "Producto", "Cant", "Subtotal"]]
@@ -552,9 +558,10 @@ def generar_pdf_valorizacion_sync():
     titulo_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, textColor=colors.HexColor('#880E4F'), spaceAfter=8)
     sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.gray, spaceAfter=15)
 
+    now_co = datetime.now(COLOMBIA_TZ)
     elements = [
         Paragraph("Soulcerón - Valorización Completa de Bodega", titulo_style),
-        Paragraph(f"Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
+        Paragraph(f"Generado el: {now_co.strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
     ]
 
     tabla_data = [["Producto", "Stock", "Costo U.", "Costo Total", "Precio V.", "Venta Total", "Proveedor"]]
@@ -609,9 +616,10 @@ def generar_pdf_agotados_sync():
     titulo_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, textColor=colors.HexColor('#D81B60'), spaceAfter=8)
     sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.gray, spaceAfter=15)
 
+    now_co = datetime.now(COLOMBIA_TZ)
     elements = [
         Paragraph("Soulcerón - Reporte de Productos Agotados", titulo_style),
-        Paragraph(f"Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
+        Paragraph(f"Generado el: {now_co.strftime('%Y-%m-%d %H:%M:%S')}", sub_style)
     ]
 
     tabla_data = [["Producto", "Stock", "Costo U.", "Precio Venta", "Proveedor"]]
@@ -691,12 +699,13 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg_final = "\n".join(mensaje)
                 pdf_buffer = generar_pdf_semana_sync()
 
+                now_co = datetime.now(COLOMBIA_TZ)
                 await query.message.reply_text(enviar_mensaje_seguro(msg_final), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
                 if pdf_buffer:
                     pdf_buffer.seek(0)
                     await query.message.reply_document(
                         document=pdf_buffer,
-                        filename=f"Balance_Semanal_{datetime.now().strftime('%d_%m_%Y')}.pdf"
+                        filename=f"Balance_Semanal_{now_co.strftime('%d_%m_%Y')}.pdf"
                     )
 
         elif query.data == "btn_valorizacion":
@@ -714,12 +723,13 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📄 *Adjunto encontrarás el reporte PDF completo del inventario.*"
                 )
                 pdf_buffer = generar_pdf_valorizacion_sync()
+                now_co = datetime.now(COLOMBIA_TZ)
                 await query.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
                 if pdf_buffer:
                     pdf_buffer.seek(0)
                     await query.message.reply_document(
                         document=pdf_buffer,
-                        filename=f"Valorizacion_Bodega_{datetime.now().strftime('%d_%m_%Y')}.pdf"
+                        filename=f"Valorizacion_Bodega_{now_co.strftime('%d_%m_%Y')}.pdf"
                     )
 
         elif query.data == "btn_stock_bajo":
@@ -735,23 +745,24 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     lineas.append(f"• **{n}**")
                 
                 pdf_buffer = generar_pdf_agotados_sync()
+                now_co = datetime.now(COLOMBIA_TZ)
                 await query.message.reply_text(enviar_mensaje_seguro("\n".join(lineas)), reply_markup=obtener_teclado_menu(), parse_mode="Markdown")
                 if pdf_buffer:
                     pdf_buffer.seek(0)
                     await query.message.reply_document(
                         document=pdf_buffer,
-                        filename=f"Productos_Agotados_{datetime.now().strftime('%d_%m_%Y')}.pdf"
+                        filename=f"Productos_Agotados_{now_co.strftime('%d_%m_%Y')}.pdf"
                     )
 
         elif query.data == "btn_reporte_pdf":
             pdf_buffer = generar_pdf_mes_sync(mes_offset=0)
-            
+            now_co = datetime.now(COLOMBIA_TZ)
             if pdf_buffer is None:
                 await query.message.reply_text("ℹ️ **No se encontraron ventas registradas durante este mes para generar el PDF.**", parse_mode="Markdown")
             else:
                 await query.message.reply_document(
                     document=pdf_buffer, 
-                    filename=f"Reporte_Mes_{datetime.now().strftime('%m_%Y')}.pdf",
+                    filename=f"Reporte_Mes_{now_co.strftime('%m_%Y')}.pdf",
                     caption="📄 Aquí tienes tu reporte PDF del mes en curso."
                 )
 
@@ -763,8 +774,28 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"🔴 **Error al procesar la solicitud:** {str(e)}")
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS PROGRAMADAS (MULTIUSUARIO)
+# TAREAS AUTOMÁTICAS PROGRAMADAS (CON ZONA HORARIA DE COLOMBIA)
 # -------------------------------------------------------------------
+def tarea_saludo_manana():
+    if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
+        try:
+            msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy, **Mi barrigona hermosa** 💖✨"
+            
+            async def send():
+                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+                async with ptb_app:
+                    admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
+                    for admin_id in admins:
+                        try:
+                            await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                        except Exception as ex:
+                            logging.error(f"Error enviando saludo a admin {admin_id}: {ex}")
+            
+            import asyncio
+            asyncio.run(send())
+        except Exception as e:
+            logging.error(f"Error en saludo de la mañana: {e}")
+
 def tarea_cierre_diario():
     if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
         try:
@@ -806,6 +837,7 @@ def tarea_cierre_semanal():
                 f"📄 *Adjunto encontrarás el reporte PDF detallado de la semana.*"
             )
             pdf_buffer = generar_pdf_semana_sync()
+            now_co = datetime.now(COLOMBIA_TZ)
 
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -819,7 +851,7 @@ def tarea_cierre_semanal():
                                 await ptb_app.bot.send_document(
                                     chat_id=admin_id,
                                     document=pdf_buffer,
-                                    filename=f"Reporte_Semanal_{datetime.now().strftime('%d_%m_%Y')}.pdf"
+                                    filename=f"Reporte_Semanal_{now_co.strftime('%d_%m_%Y')}.pdf"
                                 )
                         except Exception as ex:
                             logging.error(f"Error enviando a admin {admin_id}: {ex}")
@@ -834,6 +866,7 @@ def tarea_cierre_mensual_automatico():
         try:
             pdf_buffer = generar_pdf_mes_sync(mes_offset=1)
             msg = "📈 **REPORTE AUTOMÁTICO MENSUAL** 📈\n\n📄 Adjunto encontrarás el PDF consolidado con todas las ventas del mes anterior."
+            now_co = datetime.now(COLOMBIA_TZ)
 
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -847,7 +880,7 @@ def tarea_cierre_mensual_automatico():
                                 await ptb_app.bot.send_document(
                                     chat_id=admin_id,
                                     document=pdf_buffer,
-                                    filename=f"Reporte_Mensual_Anterior_{datetime.now().strftime('%m_%Y')}.pdf"
+                                    filename=f"Reporte_Mensual_Anterior_{now_co.strftime('%m_%Y')}.pdf"
                                 )
                             else:
                                 await ptb_app.bot.send_message(chat_id=admin_id, text="ℹ️ *No se registraron ventas en el mes anterior.*", parse_mode="Markdown")
@@ -859,10 +892,21 @@ def tarea_cierre_mensual_automatico():
         except Exception as e:
             logging.error(f"Error en reporte mensual automático: {e}")
 
-scheduler = BackgroundScheduler()
+# Inicialización con zona horaria oficial de Colombia
+scheduler = BackgroundScheduler(timezone=COLOMBIA_TZ)
+
+# Saludo de la mañana a las 7:00 AM
+scheduler.add_job(tarea_saludo_manana, 'cron', hour=7, minute=0)
+
+# Cierre Diario a las 7:00 PM (19:00 hrs)
 scheduler.add_job(tarea_cierre_diario, 'cron', hour=19, minute=0)
+
+# Cierre Semanal todos los domingos a las 8:00 PM (20:00 hrs)
 scheduler.add_job(tarea_cierre_semanal, 'cron', day_of_week='sun', hour=20, minute=0)
+
+# Cierre Mensual el día 1 de cada mes a las 8:00 AM
 scheduler.add_job(tarea_cierre_mensual_automatico, 'cron', day=1, hour=8, minute=0)
+
 scheduler.start()
 
 # -------------------------------------------------------------------
