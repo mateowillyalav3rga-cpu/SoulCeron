@@ -419,6 +419,16 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 **Error al registrar compra:** {str(e)}")
 
 # -------------------------------------------------------------------
+# COMANDO DE PRUEBA DE NOTIFICACIONES
+# -------------------------------------------------------------------
+async def probar_notificaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🧪 **Iniciando prueba de notificaciones automáticas...**")
+    tarea_saludo_manana()
+    tarea_cierre_diario()
+    tarea_cierre_semanal()
+    await update.message.reply_text("✅ **Prueba enviada.** Revisa si ambos recibieron el saludo y los reportes.")
+
+# -------------------------------------------------------------------
 # GENERADORES DE PDF (MENSUAL, SEMANAL, BODEGA Y AGOTADOS)
 # -------------------------------------------------------------------
 def generar_pdf_mes_sync(mes_offset=0):
@@ -774,18 +784,22 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"🔴 **Error al procesar la solicitud:** {str(e)}")
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS PROGRAMADAS (CON ZONA HORARIA DE COLOMBIA)
+# TAREAS AUTOMÁTICAS PROGRAMADAS (CON SALUDO PERSONALIZADO)
 # -------------------------------------------------------------------
 def tarea_saludo_manana():
     if CHAT_ID_ADMIN and TELEGRAM_TOKEN:
         try:
-            msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy, **Mi barrigona hermosa** 💖✨"
-            
             async def send():
                 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 async with ptb_app:
                     admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
                     for admin_id in admins:
+                        # Si el ID coincide con el de tu esposa (Saris)
+                        if admin_id == "2074541555":
+                            msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy, **Mi barrigona hermosa** 💖✨"
+                        else:
+                            msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy 💪✨"
+                        
                         try:
                             await ptb_app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
                         except Exception as ex:
@@ -930,6 +944,7 @@ def webhook():
             ptb_app.add_handler(CommandHandler("venta", registrar_venta))
             ptb_app.add_handler(CommandHandler("compra", registrar_compra))
             ptb_app.add_handler(CommandHandler("cliente", consultar_cliente))
+            ptb_app.add_handler(CommandHandler("test_notificaciones", probar_notificaciones))
             
             ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
             ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
