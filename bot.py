@@ -3,6 +3,7 @@ import re
 import io
 import logging
 import psycopg2
+import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask, request
@@ -49,6 +50,30 @@ web_app = Flask(__name__)
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require', connect_timeout=10)
+
+def enviar_mensaje_api(chat_id: str, texto: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": texto,
+        "parse_mode": "Markdown"
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        logging.info(f"Envío API Telegram a {chat_id}: status {resp.status_code}")
+    except Exception as e:
+        logging.error(f"Error enviando mensaje API Telegram a {chat_id}: {e}")
+
+def enviar_documento_api(chat_id: str, document_buffer, filename: str, caption: str = ""):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+    document_buffer.seek(0)
+    files = {"document": (filename, document_buffer, "application/pdf")}
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "Markdown"}
+    try:
+        resp = requests.post(url, data=data, files=files, timeout=30)
+        logging.info(f"Envío Documento API Telegram a {chat_id}: status {resp.status_code}")
+    except Exception as e:
+        logging.error(f"Error enviando documento API Telegram a {chat_id}: {e}")
 
 def enviar_mensaje_seguro(texto: str, max_length: int = 4000) -> str:
     if len(texto) > max_length:
@@ -436,11 +461,11 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------------------------------------------------
 async def probar_notificaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admins = obtener_lista_admins()
-    await update.message.reply_text(f"🧪 **Iniciando prueba de notificaciones automáticas...**\nIDs destino: `{admins}`", parse_mode="Markdown")
+    await update.message.reply_text(f"🧪 **Iniciando prueba de notificaciones automáticas...**\nDestinatarios: `{admins}`", parse_mode="Markdown")
     tarea_saludo_manana()
     tarea_cierre_diario()
     tarea_cierre_semanal()
-    await update.message.reply_text("✅ **Prueba finalizada.** Por favor revisa ambos teléfonos.")
+    await update.message.reply_text("✅ **Prueba ejecutada exitosamente.** Revisa los chats.")
 
 # -------------------------------------------------------------------
 # GENERADORES DE PDF (MENSUAL, SEMANAL, BODEGA Y AGOTADOS)
@@ -798,28 +823,19 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"🔴 **Error al procesar la solicitud:** {str(e)}")
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS PROGRAMADAS (CON SALUDO PERSONALIZADO)
+# TAREAS AUTOMÁTICAS PROGRAMADAS (MEDIANTE API REQUESTS SÍNCRONO)
 # -------------------------------------------------------------------
 def tarea_saludo_manana():
     if TELEGRAM_TOKEN:
         try:
-            async def send():
-                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-                async with ptb_app:
-                    admins = obtener_lista_admins()
-                    for admin_id in admins:
-                        if str(admin_id) == ID_ESPOSA:
-                            msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy, **Mi barrigona hermosa** 💖✨"
-                        else:
-                            msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy 💪✨"
-                        
-                        try:
-                            await ptb_app.bot.send_message(chat_id=int(admin_id), text=msg, parse_mode="Markdown")
-                        except Exception as ex:
-                            logging.error(f"Error enviando saludo a admin {admin_id}: {ex}")
-            
-            import asyncio
-            asyncio.run(send())
+            admins = obtener_lista_admins()
+            for admin_id in admins:
+                if str(admin_id) == ID_ESPOSA:
+                    msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy, **Mi barrigona hermosa** 💖✨"
+                else:
+                    msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy 💪✨"
+                
+                enviar_mensaje_api(admin_id, msg)
         except Exception as e:
             logging.error(f"Error en saludo de la mañana: {e}")
 
@@ -832,19 +848,9 @@ def tarea_cierre_diario():
                 f"🔢 **Ventas realizadas hoy:** {cnt}\n"
                 f"💰 **Total recaudado:** `{formatear_cop(total)}`"
             )
-            
-            async def send():
-                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-                async with ptb_app:
-                    admins = obtener_lista_admins()
-                    for admin_id in admins:
-                        try:
-                            await ptb_app.bot.send_message(chat_id=int(admin_id), text=msg, parse_mode="Markdown")
-                        except Exception as ex:
-                            logging.error(f"Error enviando a admin {admin_id}: {ex}")
-            
-            import asyncio
-            asyncio.run(send())
+            admins = obtener_lista_admins()
+            for admin_id in admins:
+                enviar_mensaje_api(admin_id, msg)
         except Exception as e:
             logging.error(f"Error en cierre diario automático: {e}")
 
@@ -852,39 +858,34 @@ def tarea_cierre_semanal():
     if TELEGRAM_TOKEN:
         try:
             dias, totales = ventas_semana_sync()
-            cnt, total, contado, credito, ganancia = totales
-            
-            msg = (
-                f"📊 **BALANCE AUTOMÁTICO SEMANAL (DOMINGO 8:00 PM)** 📊\n\n"
-                f"🔢 **Transacciones Semana:** {cnt}\n"
-                f"💵 **Total Contado:** `{formatear_cop(contado)}`\n"
-                f"💳 **Total Crédito:** `{formatear_cop(credito)}`\n"
-                f"💰 **Recaudación Total:** `{formatear_cop(total)}`\n"
-                f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`\n\n"
-                f"📄 *Adjunto encontrarás el reporte PDF detallado de la semana.*"
-            )
+            if totales:
+                cnt, total, contado, credito, ganancia = totales
+                msg = (
+                    f"📊 **BALANCE AUTOMÁTICO SEMANAL (DOMINGO 8:00 PM)** 📊\n\n"
+                    f"🔢 **Transacciones Semana:** {cnt}\n"
+                    f"💵 **Total Contado:** `{formatear_cop(contado)}`\n"
+                    f"💳 **Total Crédito:** `{formatear_cop(credito)}`\n"
+                    f"💰 **Recaudación Total:** `{formatear_cop(total)}`\n"
+                    f"📈 **Ganancia Neta Estimada:** `{formatear_cop(ganancia)}`\n\n"
+                    f"📄 *Adjunto encontrarás el reporte PDF detallado de la semana.*"
+                )
+            else:
+                msg = "📊 **BALANCE AUTOMÁTICO SEMANAL (DOMINGO 8:00 PM)** 📊\n\nℹ️ *No se registraron ventas durante esta semana.*"
+
             pdf_buffer = generar_pdf_semana_sync()
             now_co = datetime.now(COLOMBIA_TZ)
+            admins = obtener_lista_admins()
 
-            async def send():
-                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-                async with ptb_app:
-                    admins = obtener_lista_admins()
-                    for admin_id in admins:
-                        try:
-                            await ptb_app.bot.send_message(chat_id=int(admin_id), text=msg, parse_mode="Markdown")
-                            if pdf_buffer:
-                                pdf_buffer.seek(0)
-                                await ptb_app.bot.send_document(
-                                    chat_id=int(admin_id),
-                                    document=pdf_buffer,
-                                    filename=f"Reporte_Semanal_{now_co.strftime('%d_%m_%Y')}.pdf"
-                                )
-                        except Exception as ex:
-                            logging.error(f"Error enviando a admin {admin_id}: {ex}")
-            
-            import asyncio
-            asyncio.run(send())
+            for admin_id in admins:
+                enviar_mensaje_api(admin_id, msg)
+                if pdf_buffer:
+                    pdf_buffer.seek(0)
+                    enviar_documento_api(
+                        admin_id, 
+                        pdf_buffer, 
+                        f"Reporte_Semanal_{now_co.strftime('%d_%m_%Y')}.pdf",
+                        "📄 Reporte PDF Semanal"
+                    )
         except Exception as e:
             logging.error(f"Error en cierre semanal automático: {e}")
 
@@ -894,28 +895,20 @@ def tarea_cierre_mensual_automatico():
             pdf_buffer = generar_pdf_mes_sync(mes_offset=1)
             msg = "📈 **REPORTE AUTOMÁTICO MENSUAL** 📈\n\n📄 Adjunto encontrarás el PDF consolidado con todas las ventas del mes anterior."
             now_co = datetime.now(COLOMBIA_TZ)
+            admins = obtener_lista_admins()
 
-            async def send():
-                ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-                async with ptb_app:
-                    admins = obtener_lista_admins()
-                    for admin_id in admins:
-                        try:
-                            await ptb_app.bot.send_message(chat_id=int(admin_id), text=msg, parse_mode="Markdown")
-                            if pdf_buffer:
-                                pdf_buffer.seek(0)
-                                await ptb_app.bot.send_document(
-                                    chat_id=int(admin_id),
-                                    document=pdf_buffer,
-                                    filename=f"Reporte_Mensual_Anterior_{now_co.strftime('%m_%Y')}.pdf"
-                                )
-                            else:
-                                await ptb_app.bot.send_message(chat_id=int(admin_id), text="ℹ️ *No se registraron ventas en el mes anterior.*", parse_mode="Markdown")
-                        except Exception as ex:
-                            logging.error(f"Error enviando reporte mensual a {admin_id}: {ex}")
-
-            import asyncio
-            asyncio.run(send())
+            for admin_id in admins:
+                if pdf_buffer:
+                    enviar_mensaje_api(admin_id, msg)
+                    pdf_buffer.seek(0)
+                    enviar_documento_api(
+                        admin_id,
+                        pdf_buffer,
+                        f"Reporte_Mensual_Anterior_{now_co.strftime('%m_%Y')}.pdf",
+                        "📄 Reporte PDF Mensual"
+                    )
+                else:
+                    enviar_mensaje_api(admin_id, "📈 **REPORTE AUTOMÁTICO MENSUAL** 📈\n\nℹ️ *No se registraron ventas en el mes anterior.*")
         except Exception as e:
             logging.error(f"Error en reporte mensual automático: {e}")
 
