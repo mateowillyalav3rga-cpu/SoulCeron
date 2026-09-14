@@ -1,9 +1,11 @@
 import os
 import re
 import io
+import json
 import logging
 import psycopg2
-import requests
+import urllib.request
+import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask, request
@@ -53,25 +55,59 @@ def get_db_connection():
 
 def enviar_mensaje_api(chat_id: str, texto: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
+    payload = json.dumps({
+        "chat_id": str(chat_id),
         "text": texto,
         "parse_mode": "Markdown"
-    }
+    }).encode('utf-8')
+    
+    headers = {"Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
     try:
-        resp = requests.post(url, json=payload, timeout=10)
-        logging.info(f"Envío API Telegram a {chat_id}: status {resp.status_code}")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            logging.info(f"Envío API Telegram a {chat_id}: status {response.status}")
     except Exception as e:
         logging.error(f"Error enviando mensaje API Telegram a {chat_id}: {e}")
 
 def enviar_documento_api(chat_id: str, document_buffer, filename: str, caption: str = ""):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+    
     document_buffer.seek(0)
-    files = {"document": (filename, document_buffer, "application/pdf")}
-    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "Markdown"}
+    file_bytes = document_buffer.read()
+    
+    body = bytearray()
+    
+    # Campo chat_id
+    body.extend(f"--{boundary}\r\n".encode('utf-8'))
+    body.extend(f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'.encode('utf-8'))
+    body.extend(f"{chat_id}\r\n".encode('utf-8'))
+    
+    # Campo caption
+    if caption:
+        body.extend(f"--{boundary}\r\n".encode('utf-8'))
+        body.extend(f'Content-Disposition: form-data; name="caption"\r\n\r\n'.encode('utf-8'))
+        body.extend(f"{caption}\r\n".encode('utf-8'))
+        
+    # Campo parse_mode
+    body.extend(f"--{boundary}\r\n".encode('utf-8'))
+    body.extend(f'Content-Disposition: form-data; name="parse_mode"\r\n\r\n'.encode('utf-8'))
+    body.extend("Markdown\r\n".encode('utf-8'))
+    
+    # Campo document
+    body.extend(f"--{boundary}\r\n".encode('utf-8'))
+    body.extend(f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'.encode('utf-8'))
+    body.extend("Content-Type: application/pdf\r\n\r\n".encode('utf-8'))
+    body.extend(file_bytes)
+    body.extend("\r\n".encode('utf-8'))
+    
+    body.extend(f"--{boundary}--\r\n".encode('utf-8'))
+    
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
     try:
-        resp = requests.post(url, data=data, files=files, timeout=30)
-        logging.info(f"Envío Documento API Telegram a {chat_id}: status {resp.status_code}")
+        with urllib.request.urlopen(req, timeout=30) as response:
+            logging.info(f"Envío Documento API Telegram a {chat_id}: status {response.status}")
     except Exception as e:
         logging.error(f"Error enviando documento API Telegram a {chat_id}: {e}")
 
@@ -823,7 +859,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"🔴 **Error al procesar la solicitud:** {str(e)}")
 
 # -------------------------------------------------------------------
-# TAREAS AUTOMÁTICAS PROGRAMADAS (MEDIANTE API REQUESTS SÍNCRONO)
+# TAREAS AUTOMÁTICAS PROGRAMADAS (CON URLLIB NATIVO)
 # -------------------------------------------------------------------
 def tarea_saludo_manana():
     if TELEGRAM_TOKEN:
