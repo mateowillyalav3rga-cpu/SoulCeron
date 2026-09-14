@@ -4,6 +4,7 @@ import io
 import logging
 import psycopg2
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from flask import Flask, request
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,7 +18,6 @@ from telegram.ext import (
 )
 
 from apscheduler.schedulers.background import BackgroundScheduler
-import pytz
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
@@ -30,7 +30,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")
 
-COLOMBIA_TZ = pytz.timezone('America/Bogota')
+COLOMBIA_TZ = ZoneInfo('America/Bogota')
 
 web_app = Flask(__name__)
 
@@ -794,7 +794,6 @@ def tarea_saludo_manana():
                 async with ptb_app:
                     admins = [cid.strip() for cid in CHAT_ID_ADMIN.split(",") if cid.strip()]
                     for admin_id in admins:
-                        # Si el ID coincide con el de tu esposa (Saris)
                         if admin_id == "2074541555":
                             msg = "☀️ **¡Buenos días!** ☀️\n\nRecuerda que estoy aquí para ayudarte a llevar tu negocio y vamos con toda el día de hoy, **Mi barrigona hermosa** 💖✨"
                         else:
