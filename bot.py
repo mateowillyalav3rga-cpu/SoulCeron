@@ -33,7 +33,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")
 
-# IDs de administradores (Tu ID y el ID corregido de tu esposa)
+# IDs oficiales de administradores
 ID_ESPOSA = "2059542689"
 ID_ESPOSO = "5197161394"
 
@@ -42,7 +42,8 @@ def obtener_lista_admins():
     if CHAT_ID_ADMIN:
         for cid in CHAT_ID_ADMIN.split(","):
             cid_clean = cid.strip().replace('"', '').replace("'", "")
-            if cid_clean and cid_clean not in admins:
+            # Ignorar el ID viejo (2074541555) si aún existe en variables de entorno de Render
+            if cid_clean and cid_clean not in admins and cid_clean != "2074541555":
                 admins.append(cid_clean)
     return admins
 
@@ -126,7 +127,7 @@ def formatear_cop(monto):
     return f"${monto:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
 # -------------------------------------------------------------------
-# MENÚ CON BOTONES INTERACTIVOS Y DETECCIÓN DE ID
+# MENÚ CON BOTONES INTERACTIVOS
 # -------------------------------------------------------------------
 def obtener_teclado_menu():
     keyboard = [
