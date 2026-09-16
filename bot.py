@@ -119,7 +119,7 @@ def enviar_mensaje_seguro(texto: str, max_length: int = 4000) -> str:
     return texto
 
 def formatear_cop(monto):
-    return f"${monto:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+    return f"${float(monto):,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
 # -------------------------------------------------------------------
 # MENÚ CON BOTONES INTERACTIVOS
@@ -202,14 +202,22 @@ def ventas_hoy_sync():
     res = cur.fetchone()
     cur.close()
     conn.close()
+    
+    cnt = int(res[0])
+    recaudado = float(res[1])
+    contado = float(res[2])
+    credito = float(res[3])
+    inversion = float(res[4])
+    ganancia = float(res[5])
+    
     return {
-        'ventas': res[0],
-        'recaudado': res[1],
-        'contado': res[2],
-        'credito': res[3],
-        'inversion': res[4],
-        'ganancia': res[5],
-        'ahorro_50': res[5] * 0.5
+        'ventas': cnt,
+        'recaudado': recaudado,
+        'contado': contado,
+        'credito': credito,
+        'inversion': inversion,
+        'ganancia': ganancia,
+        'ahorro_50': ganancia * 0.5
     }
 
 def ventas_semana_sync(semana_offset=0):
@@ -252,14 +260,21 @@ def ventas_semana_sync(semana_offset=0):
     cur.close()
     conn.close()
     
+    cnt = int(res[0])
+    recaudado = float(res[1])
+    contado = float(res[2])
+    credito = float(res[3])
+    inversion = float(res[4])
+    ganancia = float(res[5])
+    
     totales_dict = {
-        'ventas': res[0],
-        'recaudado': res[1],
-        'contado': res[2],
-        'credito': res[3],
-        'inversion': res[4],
-        'ganancia': res[5],
-        'ahorro_50': res[5] * 0.5
+        'ventas': cnt,
+        'recaudado': recaudado,
+        'contado': contado,
+        'credito': credito,
+        'inversion': inversion,
+        'ganancia': ganancia,
+        'ahorro_50': ganancia * 0.5
     }
     
     return dias, totales_dict
@@ -306,7 +321,7 @@ def construir_comparativa_semanal():
 
 def stock_bajo_sync():
     query = """
-    SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre_empresa, 'Sin Proveedor') AS proveedor
+    SELECT p.nombre, p.stock_actual, float(p.costo_compra), float(p.precio_venta), COALESCE(pr.nombre_empresa, 'Sin Proveedor') AS proveedor
     FROM productos p
     LEFT JOIN proveedores pr ON p.id_proveedor = pr.id_proveedor
     WHERE p.stock_actual = 0 
@@ -331,7 +346,9 @@ def valorizacion_sync():
     res = cur.fetchone()
     cur.close()
     conn.close()
-    return res[0] or 0, res[1] or 0
+    c = float(res[0]) if res[0] is not None else 0.0
+    v = float(res[1]) if res[1] is not None else 0.0
+    return c, v
 
 def inventario_completo_sync():
     query = """
@@ -398,7 +415,7 @@ async def consultar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
     except Exception as e:
-        await update.message.reply_text(f"🔴 <b>Error al consultar cliente:</b> {str(e)}")
+        await update.message.reply_text(f"🔴 <b>Error al consultar cliente:</b> {str(e)}", parse_mode="HTML")
 
 # -------------------------------------------------------------------
 # REGISTRO DE VENTAS SIMPLIFICADO (/v o /venta) Y COMPRAS (/compra)
@@ -471,12 +488,13 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prod_res = cur.fetchone()
 
             if prod_res:
+                precio_v = float(prod_res[2])
                 productos_encontrados.append({
                     'id_producto': prod_res[0],
                     'nombre_real': prod_res[1],
                     'cantidad': cantidad,
-                    'precio_unitario': prod_res[2],
-                    'subtotal': cantidad * prod_res[2]
+                    'precio_unitario': precio_v,
+                    'subtotal': cantidad * precio_v
                 })
             else:
                 productos_no_encontrados.append(prod_clean)
@@ -538,7 +556,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
     except Exception as e:
-        await update.message.reply_text(f"🔴 <b>Error al registrar venta:</b> {str(e)}")
+        await update.message.reply_text(f"🔴 <b>Error al registrar venta:</b> {str(e)}", parse_mode="HTML")
 
 async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
@@ -589,7 +607,7 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"📦 <b>Resumen de Reabastecimiento / Compras:</b>\n\n" + "\n\n".join(resúmenes)
         await update.message.reply_text(enviar_mensaje_seguro(msg), reply_markup=obtener_teclado_menu(), parse_mode="HTML")
     except Exception as e:
-        await update.message.reply_text(f"🔴 <b>Error al registrar compra:</b> {str(e)}")
+        await update.message.reply_text(f"🔴 <b>Error al registrar compra:</b> {str(e)}", parse_mode="HTML")
 
 # -------------------------------------------------------------------
 # COMANDO DE PRUEBA DE NOTIFICACIONES
@@ -600,7 +618,7 @@ async def probar_notificaciones(update: Update, context: ContextTypes.DEFAULT_TY
     tarea_saludo_manana()
     tarea_cierre_diario()
     tarea_cierre_semanal()
-    await update.message.reply_text("✅ <b>Prueba ejecutada exitosamente.</b> Revisa los chats.")
+    await update.message.reply_text("✅ <b>Prueba ejecutada exitosamente.</b> Revisa los chats.", parse_mode="HTML")
 
 # -------------------------------------------------------------------
 # GENERADORES DE PDF (DIARIO, MENSUAL, SEMANAL, BODEGA Y AGOTADOS)
@@ -639,10 +657,11 @@ def generar_pdf_dia_sync():
     ]
 
     tabla_data = [["ID", "Hora", "Cliente", "Pago", "Producto", "Cant", "Subtotal"]]
-    grand_total = 0
+    grand_total = 0.0
 
     for id_v, fecha, cl, pago, prod, cant, precio, subtotal in detalles:
-        grand_total += subtotal
+        sub_fl = float(subtotal)
+        grand_total += sub_fl
         tabla_data.append([
             str(id_v), 
             fecha.strftime('%H:%M'), 
@@ -650,7 +669,7 @@ def generar_pdf_dia_sync():
             str(pago).capitalize(), 
             str(prod), 
             str(cant), 
-            formatear_cop(subtotal)
+            formatear_cop(sub_fl)
         ])
 
     tabla_data.append(["", "", "", "", "", "TOTAL:", formatear_cop(grand_total)])
@@ -706,11 +725,12 @@ def generar_pdf_mes_sync(mes_offset=0):
     ]
 
     tabla_data = [["ID Venta", "Fecha", "Cliente", "Tipo Pago", "Total"]]
-    grand_total = 0
+    grand_total = 0.0
 
     for id_v, fecha, cl, pago, total in ventas:
-        grand_total += total
-        tabla_data.append([str(id_v), fecha.strftime('%Y-%m-%d'), str(cl), str(pago).capitalize(), formatear_cop(total)])
+        tot_fl = float(total)
+        grand_total += tot_fl
+        tabla_data.append([str(id_v), fecha.strftime('%Y-%m-%d'), str(cl), str(pago).capitalize(), formatear_cop(tot_fl)])
 
     tabla_data.append(["", "", "", "TOTAL MES:", formatear_cop(grand_total)])
 
@@ -764,10 +784,11 @@ def generar_pdf_semana_sync():
     ]
 
     tabla_data = [["ID", "Fecha", "Cliente", "Pago", "Producto", "Cant", "Subtotal"]]
-    grand_total = 0
+    grand_total = 0.0
 
     for id_v, fecha, cl, pago, prod, cant, precio, subtotal in detalles:
-        grand_total += subtotal
+        sub_fl = float(subtotal)
+        grand_total += sub_fl
         tabla_data.append([
             str(id_v), 
             fecha.strftime('%d/%m'), 
@@ -775,7 +796,7 @@ def generar_pdf_semana_sync():
             str(pago).capitalize(), 
             str(prod), 
             str(cant), 
-            formatear_cop(subtotal)
+            formatear_cop(sub_fl)
         ])
 
     tabla_data.append(["", "", "", "", "", "TOTAL:", formatear_cop(grand_total)])
@@ -816,21 +837,23 @@ def generar_pdf_valorizacion_sync():
     ]
 
     tabla_data = [["Producto", "Stock", "Costo U.", "Costo Total", "Precio V.", "Venta Total", "Proveedor"]]
-    total_costo_inv = 0
-    total_venta_pot = 0
+    total_costo_inv = 0.0
+    total_venta_pot = 0.0
 
     for nombre, stock, costo, precio, proveedor in productos:
-        costo_total = stock * costo
-        venta_total = stock * precio
+        c_fl = float(costo)
+        p_fl = float(precio)
+        costo_total = stock * c_fl
+        venta_total = stock * p_fl
         total_costo_inv += costo_total
         total_venta_pot += venta_total
 
         tabla_data.append([
             str(nombre),
             str(stock),
-            formatear_cop(costo),
+            formatear_cop(c_fl),
             formatear_cop(costo_total),
-            formatear_cop(precio),
+            formatear_cop(p_fl),
             formatear_cop(venta_total),
             str(proveedor)
         ])
@@ -914,10 +937,8 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pdf_buffer = generar_pdf_dia_sync()
             now_co = datetime.now(COLOMBIA_TZ)
 
-            # 1. Resumen con todas las métricas
             await query.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="HTML")
             
-            # 2. PDF con desglose del día
             if pdf_buffer:
                 pdf_buffer.seek(0)
                 await query.message.reply_document(
@@ -926,7 +947,6 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption="📄 Reporte PDF con el desglose de ventas de hoy."
                 )
             
-            # 3. Menú de opciones
             await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
         elif query.data == "btn_ventas_semana":
@@ -940,10 +960,8 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pdf_buffer = generar_pdf_semana_sync()
                 now_co = datetime.now(COLOMBIA_TZ)
 
-                # 1. Resumen de la semana en curso (Sin comparativa previa para ser equitativos)
                 await query.message.reply_text(enviar_mensaje_seguro(msg_resumen), parse_mode="HTML")
                 
-                # 2. PDF con el desglose semanal hasta la fecha
                 if pdf_buffer:
                     pdf_buffer.seek(0)
                     await query.message.reply_document(
@@ -952,7 +970,6 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         caption="📄 Reporte PDF semanal hasta la fecha."
                     )
             
-            # 3. Menú de opciones
             await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
         elif query.data == "btn_valorizacion":
@@ -1025,7 +1042,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logging.error(f"Error en callback: {e}")
-        await query.message.reply_text(f"🔴 <b>Error al procesar la solicitud:</b> {str(e)}")
+        await query.message.reply_text(f"🔴 <b>Error al procesar la solicitud:</b> {str(e)}", parse_mode="HTML")
 
 # -------------------------------------------------------------------
 # TAREAS AUTOMÁTICAS PROGRAMADAS
@@ -1091,11 +1108,8 @@ def tarea_cierre_semanal():
             admins = obtener_lista_admins()
 
             for admin_id in admins:
-                # Mensaje 1: Resumen con todos los datos pormenorizados
                 enviar_mensaje_api(admin_id, msg_resumen)
-                # Mensaje 2: Comparativa automática exclusiva del Domingo a las 8pm
                 enviar_mensaje_api(admin_id, msg_comparativa)
-                # Documento PDF
                 if pdf_buffer:
                     pdf_buffer.seek(0)
                     enviar_documento_api(
