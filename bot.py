@@ -127,15 +127,17 @@ def formatear_cop(monto):
 def obtener_teclado_menu():
     keyboard = [
         [
-            InlineKeyboardButton("📊 Ventas Hoy", callback_data="btn_ventas_hoy"),
-            InlineKeyboardButton("📅 Balance Semanal", callback_data="btn_ventas_semana")
+            InlineKeyboardButton("📊 Ventas Hoy", callback_data="btn_ventas_hoy")
+        ],
+        [
+            InlineKeyboardButton("📅 Balance Semanal", callback_data="btn_ventas_semana"),
+            InlineKeyboardButton("🗓️ Balance Mensual", callback_data="btn_ventas_mes")
         ],
         [
             InlineKeyboardButton("🏢 Valorización Bodega", callback_data="btn_valorizacion"),
             InlineKeyboardButton("🚫 Productos Agotados", callback_data="btn_stock_bajo")
         ],
         [
-            InlineKeyboardButton("📄 Reporte PDF Mes", callback_data="btn_reporte_pdf"),
             InlineKeyboardButton("❓ Ayuda / Formatos", callback_data="btn_ayuda")
         ]
     ]
@@ -279,6 +281,44 @@ def ventas_semana_sync(semana_offset=0):
     
     return dias, totales_dict
 
+def ventas_mes_sync(mes_offset=0):
+    query_totales = f"""
+    SELECT 
+        COUNT(DISTINCT v.id_venta) AS total_ventas,
+        COALESCE(SUM(dv.cantidad * dv.precio_unitario), 0) AS total_recaudado,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
+        COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito,
+        COALESCE(SUM(dv.cantidad * p.costo_compra), 0) AS total_inversion,
+        COALESCE(SUM(dv.cantidad * (dv.precio_unitario - p.costo_compra)), 0) AS ganancia_total
+    FROM ventas v
+    JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
+    JOIN productos p ON dv.id_producto = p.id_producto
+    WHERE DATE_TRUNC('month', v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota') = DATE_TRUNC('month', CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota' - INTERVAL '{mes_offset} month');
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(query_totales)
+    res = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    cnt = int(res[0])
+    recaudado = float(res[1])
+    contado = float(res[2])
+    credito = float(res[3])
+    inversion = float(res[4])
+    ganancia = float(res[5])
+    
+    return {
+        'ventas': cnt,
+        'recaudado': recaudado,
+        'contado': contado,
+        'credito': credito,
+        'inversion': inversion,
+        'ganancia': ganancia,
+        'ahorro_50': ganancia * 0.5
+    }
+
 def construir_mensaje_resumen_completo(titulo, datos):
     if datos['ventas'] == 0:
         return f"ℹ️ <b>No se registraron ventas en este periodo ({titulo}).</b>"
@@ -305,7 +345,7 @@ def construir_comparativa_semanal():
             signo = "+" if dif >= 0 else ""
             return f"<code>{formatear_cop(val_act)}</code> ({signo}{pct:.1f}% vs. semana ant. <code>{formatear_cop(val_ant)}</code>)"
         else:
-            return f"<code>{formatear_cop(val_act)}</code> (Sin datos previas)"
+            return f"<code>{formatear_cop(val_act)}</code> (Sin datos previos)"
 
     msg = (
         f"📉 <b>COMPARATIVA SEMANAL (Vs. Semana Anterior)</b> 📈\n\n"
@@ -319,9 +359,34 @@ def construir_comparativa_semanal():
     )
     return msg
 
+def construir_comparativa_mensual():
+    actual = ventas_mes_sync(1)   # Mes recién cerrado
+    anterior = ventas_mes_sync(2) # Mes antepasado
+    
+    def diff_str(val_act, val_ant):
+        dif = val_act - val_ant
+        if val_ant > 0:
+            pct = (dif / val_ant) * 100
+            signo = "+" if dif >= 0 else ""
+            return f"<code>{formatear_cop(val_act)}</code> ({signo}{pct:.1f}% vs. mes ant. <code>{formatear_cop(val_ant)}</code>)"
+        else:
+            return f"<code>{formatear_cop(val_act)}</code> (Sin datos previos)"
+
+    msg = (
+        f"📉 <b>COMPARATIVA MENSUAL (Mes Cerrado Vs. Mes Anterior)</b> 📈\n\n"
+        f"🔢 <b>Ventas:</b> {actual['ventas']} (Mes Antepasado: {anterior['ventas']})\n"
+        f"💰 <b>Recaudado:</b> {diff_str(actual['recaudado'], anterior['recaudado'])}\n"
+        f"💵 <b>Contado:</b> {diff_str(actual['contado'], anterior['contado'])}\n"
+        f"💳 <b>Crédito:</b> {diff_str(actual['credito'], anterior['credito'])}\n"
+        f"📦 <b>Inversión:</b> {diff_str(actual['inversion'], anterior['inversion'])}\n"
+        f"📈 <b>Ganancia Neta:</b> {diff_str(actual['ganancia'], anterior['ganancia'])}\n"
+        f"🏦 <b>Ahorro (50%):</b> {diff_str(actual['ahorro_50'], anterior['ahorro_50'])}"
+    )
+    return msg
+
 def stock_bajo_sync():
     query = """
-    SELECT p.nombre, p.stock_actual, float(p.costo_compra), float(p.precio_venta), COALESCE(pr.nombre_empresa, 'Sin Proveedor') AS proveedor
+    SELECT p.nombre, p.stock_actual, p.costo_compra::float, p.precio_venta::float, COALESCE(pr.nombre_empresa, 'Sin Proveedor') AS proveedor
     FROM productos p
     LEFT JOIN proveedores pr ON p.id_proveedor = pr.id_proveedor
     WHERE p.stock_actual = 0 
@@ -618,6 +683,7 @@ async def probar_notificaciones(update: Update, context: ContextTypes.DEFAULT_TY
     tarea_saludo_manana()
     tarea_cierre_diario()
     tarea_cierre_semanal()
+    tarea_cierre_mensual_automatico()
     await update.message.reply_text("✅ <b>Prueba ejecutada exitosamente.</b> Revisa los chats.", parse_mode="HTML")
 
 # -------------------------------------------------------------------
@@ -972,6 +1038,28 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
+        elif query.data == "btn_ventas_mes":
+            datos_mes = ventas_mes_sync(0)
+            if datos_mes['ventas'] == 0:
+                msg_final = "ℹ️ <b>No se encontraron ventas registradas en lo que va de este mes.</b>"
+                await query.message.reply_text(enviar_mensaje_seguro(msg_final), parse_mode="HTML")
+            else:
+                msg_resumen = construir_mensaje_resumen_completo("Balance del Mes (En curso)", datos_mes)
+                pdf_buffer = generar_pdf_mes_sync(mes_offset=0)
+                now_co = datetime.now(COLOMBIA_TZ)
+
+                await query.message.reply_text(enviar_mensaje_seguro(msg_resumen), parse_mode="HTML")
+                
+                if pdf_buffer:
+                    pdf_buffer.seek(0)
+                    await query.message.reply_document(
+                        document=pdf_buffer,
+                        filename=f"Balance_Mensual_{now_co.strftime('%m_%Y')}.pdf",
+                        caption="📄 Reporte PDF mensual hasta la fecha."
+                    )
+
+            await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+
         elif query.data == "btn_valorizacion":
             costo, venta = valorizacion_sync()
             ganancia_est = venta - costo
@@ -1002,7 +1090,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data == "btn_stock_bajo":
             filas = stock_bajo_sync()
             if not filas:
-                await query.message.reply_text("✅ <b>No se encontraron productos agotados. ¡Tu stock está al día!</b>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
+                await query.message.reply_text("✅ <b>No se encontraron productos agotados. ¡Tu stock está al día!</b>", parse_mode="HTML")
             else:
                 lineas = [
                     "🚫 <b>Productos Totalmente Agotados (0 uds.)</b>\n",
@@ -1022,19 +1110,6 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         filename=f"Productos_Agotados_{now_co.strftime('%d_%m_%Y')}.pdf"
                     )
 
-            await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
-
-        elif query.data == "btn_reporte_pdf":
-            pdf_buffer = generar_pdf_mes_sync(mes_offset=0)
-            now_co = datetime.now(COLOMBIA_TZ)
-            if pdf_buffer is None:
-                await query.message.reply_text("ℹ️ <b>No se encontraron ventas registradas durante este mes para generar el PDF.</b>", parse_mode="HTML")
-            else:
-                await query.message.reply_document(
-                    document=pdf_buffer, 
-                    filename=f"Reporte_Mes_{now_co.strftime('%m_%Y')}.pdf",
-                    caption="📄 Aquí tienes tu reporte PDF del mes en curso."
-                )
             await query.message.reply_text("👇 <i>Selecciona una opción del menú para continuar:</i>", reply_markup=obtener_teclado_menu(), parse_mode="HTML")
 
         elif query.data == "btn_ayuda":
@@ -1124,14 +1199,23 @@ def tarea_cierre_semanal():
 def tarea_cierre_mensual_automatico():
     if TELEGRAM_TOKEN:
         try:
+            datos_mes_cerrado = ventas_mes_sync(1) # Mes inmediatamente anterior
+            msg_resumen = (
+                f"📈 <b>REPORTE AUTOMÁTICO MENSUAL (1° DEL MES - 8:00 AM)</b> 📈\n\n"
+                f"{construir_mensaje_resumen_completo('Consolidado Mes Anterior', datos_mes_cerrado)}"
+            )
+            msg_comparativa = construir_comparativa_mensual()
             pdf_buffer = generar_pdf_mes_sync(mes_offset=1)
-            msg = "📈 <b>REPORTE AUTOMÁTICO MENSUAL</b> 📈\n\n📄 Adjunto encontrarás el PDF consolidado con todas las ventas del mes anterior."
             now_co = datetime.now(COLOMBIA_TZ)
             admins = obtener_lista_admins()
 
             for admin_id in admins:
+                # Mensaje 1: Resumen con todos los datos pormenorizados del mes finalizado
+                enviar_mensaje_api(admin_id, msg_resumen)
+                # Mensaje 2: Comparativa entre el mes finalizado y el mes anterior
+                enviar_mensaje_api(admin_id, msg_comparativa)
+                # Documento PDF
                 if pdf_buffer:
-                    enviar_mensaje_api(admin_id, msg)
                     pdf_buffer.seek(0)
                     enviar_documento_api(
                         admin_id,
@@ -1139,8 +1223,6 @@ def tarea_cierre_mensual_automatico():
                         f"Reporte_Mensual_Anterior_{now_co.strftime('%m_%Y')}.pdf",
                         "📄 Reporte PDF Mensual"
                     )
-                else:
-                    enviar_mensaje_api(admin_id, "📈 <b>REPORTE AUTOMÁTICO MENSUAL</b> 📈\n\nℹ️ <i>No se registraron ventas en el mes anterior.</i>")
         except Exception as e:
             logging.error(f"Error en reporte mensual automático: {e}")
 
