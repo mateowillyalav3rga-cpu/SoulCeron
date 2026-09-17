@@ -1251,45 +1251,48 @@ scheduler.start()
 # -------------------------------------------------------------------
 @web_app.route('/', methods=['GET'])
 def home():
-    return "Bot de Soulcerón Activo con Menú Interactivo."
+  return 'Bot de Soulcerón Activo con Menú Interactivo.'
+
 
 @web_app.route('/webhook', methods=['POST'])
 def webhook():
-    if request.method == "POST":
-        json_data = request.get_json(force=True)
-        
-        async def process():
-            ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-            
-            ptb_app.add_handler(CommandHandler("start", start))
-            ptb_app.add_handler(CommandHandler("menu", start))
-            ptb_app.add_handler(CommandHandler("ayuda", ayuda))
-            ptb_app.add_handler(CommandHandler("v", registrar_venta))
-            ptb_app.add_handler(CommandHandler("venta", registrar_venta))
-            ptb_app.add_handler(CommandHandler("compra", registrar_compra))
-            ptb_app.add_handler(CommandHandler("cliente", consultar_cliente))
-            ptb_app.add_handler(CommandHandler("test_notificaciones", probar_notificaciones))
-            
-            ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
-            ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/v\b"), registrar_venta))
-            ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/venta"), registrar_venta))
-            ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/compra"), registrar_compra))
-            ptb_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.Regex(r"(?i)^/cliente"), consultar_cliente))
+  if request.method == 'POST':
+    json_data = request.get_json(force=True)
 
-            async with ptb_app:
-                update = Update.de_json(json_data, ptb_app.bot)
-                await ptb_app.process_update(update)
+    async def process():
+      ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(process())
-        finally:
-            loop.close()
-            
-        return 'ok', 200
+      # Handlers de Comandos (Único punto de entrada por comando)
+      ptb_app.add_handler(CommandHandler('start', start))
+      ptb_app.add_handler(CommandHandler('menu', start))
+      ptb_app.add_handler(CommandHandler('ayuda', ayuda))
+      ptb_app.add_handler(CommandHandler('v', registrar_venta))
+      ptb_app.add_handler(CommandHandler('venta', registrar_venta))
+      ptb_app.add_handler(CommandHandler('compra', registrar_compra))
+      ptb_app.add_handler(CommandHandler('cliente', consultar_cliente))
+      ptb_app.add_handler(
+          CommandHandler('test_notificaciones', probar_notificaciones)
+      )
+
+      # Handlers de Callbacks de Botones
+      ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
+
+      async with ptb_app:
+        update = Update.de_json(json_data, ptb_app.bot)
+        await ptb_app.process_update(update)
+
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+      loop.run_until_complete(process())
+    finally:
+      loop.close()
+
+    return 'ok', 200
+
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
+  port = int(os.environ.get('PORT', 10000))
+  web_app.run(host='0.0.0.0', port=port)
