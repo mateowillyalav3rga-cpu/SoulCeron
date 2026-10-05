@@ -38,7 +38,7 @@ CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")
 ID_ESPOSA = "2059542689"
 ID_ESPOSO = "5197161394"
 
-# Set en memoria para desduplicar mensajes de Telegram sin alterar el esquema de la BD
+# Control de desduplicación de mensajes por update_id
 UPDATES_PROCESADOS = set()
 
 
@@ -245,7 +245,207 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# LÓGICA DE CONSULTAS SQL Y MÉTRICAS
+# LÓGICA DE REGISTRO DE VENTA (REDISEÑADA DESDE CERO)
+# -------------------------------------------------------------------
+async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  texto = update.message.text.strip()
+  lineas = [l.strip() for l in texto.split("\n") if l.strip()]
+
+  if len(lineas) < 4:
+    await update.message.reply_text(
+        "❌ <b>Formato de venta incorrecto.</b> Usa:\n\n"
+        "<pre>\n"
+        "v\n"
+        "Nombre Cliente\n"
+        "contado\n"
+        "Producto, Cantidad\n"
+        "Otro Producto, 2\n"
+        "</pre>",
+        parse_mode="HTML",
+    )
+    return
+
+  cliente_nombre = lineas[1]
+  tipo_pago = lineas[2].lower()
+
+  if tipo_pago not in ["contado", "credito"]:
+    await update.message.reply_text(
+        "❌ El tipo de pago (línea 3) debe ser <code>contado</code> o"
+        " <code>credito</code>.",
+        parse_mode="HTML",
+    )
+    return
+
+  items_raw = []
+  for l in lineas[3:]:
+    l_clean = re.sub(r"^\s*-\s*", "", l)
+    parts = l_clean.split(",")
+    if len(parts) >= 2:
+      prod_p = ",".join(parts[:-1]).strip()
+      cant_p = parts[-1].strip()
+      if cant_p.isdigit() and int(cant_p) > 0:
+        items_raw.append((prod_p, int(cant_p)))
+
+  if not items_raw:
+    await update.message.reply_text(
+        "❌ No se reconocieron productos válidos. Revisa el formato (Nombre,"
+        " Cantidad).",
+        parse_mode="HTML",
+    )
+    return
+
+  conn = None
+  try:
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    productos_encontrados = []
+    productos_no_encontrados = []
+
+    # 1. PASO A: Capturar información actual y stock exacto
+    for prod_clean, cantidad_deseada in items_raw:
+      query_check = """
+            SELECT id_producto, nombre, precio_venta, stock_actual
+            FROM productos 
+            WHERE LOWER(nombre) LIKE LOWER(%s) 
+            ORDER BY 
+                CASE WHEN LOWER(nombre) = LOWER(%s) THEN 1 ELSE 2 END,
+                LENGTH(nombre) ASC 
+            LIMIT 1 FOR UPDATE;
+            """
+      cur.execute(query_check, (f"%{prod_clean}%", prod_clean))
+      prod_res = cur.fetchone()
+
+      if prod_res:
+        p_id, p_nombre, p_precio, p_stock_actual = prod_res
+        productos_encontrados.append({
+            "id_producto": p_id,
+            "nombre_real": p_nombre,
+            "cantidad_vendida": cantidad_deseada,
+            "precio_unitario": float(p_precio),
+            "subtotal": cantidad_deseada * float(p_precio),
+            "stock_inicial": int(p_stock_actual),
+        })
+      else:
+        productos_no_encontrados.append(prod_clean)
+
+    if productos_no_encontrados:
+      cur.close()
+      conn.close()
+      lineas_error = [
+          "🔴 <b>Venta cancelada. Los siguientes productos no existen en"
+          " inventario:</b>\n"
+      ]
+      for p_err in productos_no_encontrados:
+        lineas_error.append(f"❌ <code>{p_err}</code>")
+      lineas_error.append(
+          "\n💡 <i>Regístralos primero con <code>c</code> o <code>compra</code>"
+          " antes de venderlos.</i>"
+      )
+      await update.message.reply_text(
+          "\n".join(lineas_error), parse_mode="HTML"
+      )
+      return
+
+    # 2. PASO B: Gestionar Cliente
+    query_check_cliente = (
+        "SELECT id_cliente FROM clientes WHERE LOWER(nombre) LIKE LOWER(%s)"
+        " LIMIT 1;"
+    )
+    cur.execute(query_check_cliente, (f"%{cliente_nombre}%",))
+    res_c = cur.fetchone()
+
+    if res_c:
+      id_cliente = res_c[0]
+      etiqueta_cliente = "👤 <code>[CLIENTE REGISTRADO]</code>"
+    else:
+      query_add_cliente = (
+          "INSERT INTO clientes (nombre) VALUES (%s) RETURNING id_cliente;"
+      )
+      cur.execute(query_add_cliente, (cliente_nombre,))
+      id_cliente = cur.fetchone()[0]
+      etiqueta_cliente = "✨ <code>[NUEVO CLIENTE]</code>"
+
+    # 3. PASO C: Crear cabecera de la venta
+    query_nueva_venta = (
+        "INSERT INTO ventas (id_cliente, tipo_pago) VALUES (%s, %s) RETURNING"
+        " id_venta;"
+    )
+    cur.execute(query_nueva_venta, (id_cliente, tipo_pago))
+    id_venta = cur.fetchone()[0]
+
+    # 4. PASO D: Insertar detalle y ejecutar RESTA MATEMÁTICA PURA
+    total_venta = 0.0
+    lista_detalles_msg = []
+
+    for item in productos_encontrados:
+      # Registramos el detalle de la venta
+      query_detalle = """
+            INSERT INTO detalle_ventas (id_venta, id_producto, cantidad, precio_unitario)
+            VALUES (%s, %s, %s, %s);
+            """
+      cur.execute(
+          query_detalle,
+          (
+              id_venta,
+              item["id_producto"],
+              item["cantidad_vendida"],
+              item["precio_unitario"],
+          ),
+      )
+
+      # RESTA MATEMÁTICA EXPLÍCITA EN PYTHON:
+      stock_existente = item["stock_inicial"]
+      unidades_a_restar = item["cantidad_vendida"]
+      nuevo_stock_calculado = max(0, stock_existente - unidades_a_restar)
+
+      # Asignación directa del nuevo stock
+      query_actualizar_stock = """
+            UPDATE productos 
+            SET stock_actual = %s
+            WHERE id_producto = %s;
+            """
+      cur.execute(
+          query_actualizar_stock, (nuevo_stock_calculado, item["id_producto"])
+      )
+
+      total_venta += item["subtotal"]
+      lista_detalles_msg.append(
+          f"• <b>{item['nombre_real']}</b> x{unidades_a_restar} —"
+          f" <code>{formatear_cop(item['subtotal'])}</code> (<i>Habían:"
+          f" {stock_existente} | Quedan: {nuevo_stock_calculado} uds.</i>)"
+      )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    msg = (
+        f"🎉 <b>¡Venta #{id_venta} Registrada Exitosamente!</b> 🎉\n\n"
+        f"👤 <b>Cliente:</b> {cliente_nombre} {etiqueta_cliente}\n"
+        f"💳 <b>Método de Pago:</b> {tipo_pago.capitalize()}\n\n"
+        "📋 <b>Productos Procesados:</b>\n"
+        + "\n".join(lista_detalles_msg)
+        + "\n\n"
+        f"💰 <b>TOTAL COBRADO:</b> <code>{formatear_cop(total_venta)}</code>"
+    )
+
+    admins = obtener_lista_admins()
+    for admin_id in admins:
+      enviar_mensaje_api(admin_id, enviar_mensaje_seguro(msg))
+
+  except Exception as e:
+    if conn:
+      conn.rollback()
+      conn.close()
+    logging.error(f"Error registrando venta: {e}")
+    await update.message.reply_text(
+        f"🔴 <b>Error al registrar venta:</b> {str(e)}", parse_mode="HTML"
+    )
+
+
+# -------------------------------------------------------------------
+# OTRAS FUNCIONES Y MÉTRICAS
 # -------------------------------------------------------------------
 def ventas_hoy_sync():
   query = """
@@ -522,9 +722,6 @@ def inventario_completo_sync():
   return filas
 
 
-# -------------------------------------------------------------------
-# CONSULTA DE CLIENTE (n O nombre)
-# -------------------------------------------------------------------
 async def consultar_cliente(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -598,198 +795,6 @@ async def consultar_cliente(
     )
 
 
-# -------------------------------------------------------------------
-# LÓGICA DE REGISTRO DE VENTAS (100% FUNCIONAL Y ROBUSTA)
-# -------------------------------------------------------------------
-async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  texto = update.message.text.strip()
-  lineas = [l.strip() for l in texto.split("\n") if l.strip()]
-
-  if len(lineas) < 4:
-    await update.message.reply_text(
-        "❌ <b>Formato de venta incorrecto.</b> Usa:\n\n"
-        "<pre>\n"
-        "v\n"
-        "Nombre Cliente\n"
-        "contado\n"
-        "Producto, Cantidad\n"
-        "Otro Producto, 2\n"
-        "</pre>",
-        parse_mode="HTML",
-    )
-    return
-
-  cliente_nombre = lineas[1]
-  tipo_pago = lineas[2].lower()
-
-  if tipo_pago not in ["contado", "credito"]:
-    await update.message.reply_text(
-        "❌ El tipo de pago (línea 3) debe ser <code>contado</code> o"
-        " <code>credito</code>.",
-        parse_mode="HTML",
-    )
-    return
-
-  items_raw = []
-  for l in lineas[3:]:
-    l_clean = re.sub(r"^\s*-\s*", "", l)
-    parts = l_clean.split(",")
-    if len(parts) >= 2:
-      prod_p = ",".join(parts[:-1]).strip()
-      cant_p = parts[-1].strip()
-      if cant_p.isdigit() and int(cant_p) > 0:
-        items_raw.append((prod_p, int(cant_p)))
-
-  if not items_raw:
-    await update.message.reply_text(
-        "❌ No se reconocieron productos válidos. Revisa el formato (Nombre,"
-        " Cantidad).",
-        parse_mode="HTML",
-    )
-    return
-
-  conn = None
-  try:
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    productos_encontrados = []
-    productos_no_encontrados = []
-
-    for prod_clean, cantidad in items_raw:
-      query_check = """
-            SELECT id_producto, nombre, precio_venta, stock_actual
-            FROM productos 
-            WHERE LOWER(nombre) LIKE LOWER(%s) 
-            ORDER BY 
-                CASE WHEN LOWER(nombre) = LOWER(%s) THEN 1 ELSE 2 END,
-                LENGTH(nombre) ASC 
-            LIMIT 1;
-            """
-      cur.execute(query_check, (f"%{prod_clean}%", prod_clean))
-      prod_res = cur.fetchone()
-
-      if prod_res:
-        precio_v = float(prod_res[2])
-        productos_encontrados.append({
-            "id_producto": prod_res[0],
-            "nombre_real": prod_res[1],
-            "cantidad": cantidad,
-            "precio_unitario": precio_v,
-            "subtotal": cantidad * precio_v,
-            "stock_actual": prod_res[3],
-        })
-      else:
-        productos_no_encontrados.append(prod_clean)
-
-    if productos_no_encontrados:
-      cur.close()
-      conn.close()
-      lineas_error = [
-          "🔴 <b>Venta cancelada. Los siguientes productos no existen en"
-          " inventario:</b>\n"
-      ]
-      for p_err in productos_no_encontrados:
-        lineas_error.append(f"❌ <code>{p_err}</code>")
-      lineas_error.append(
-          "\n💡 <i>Regístralos primero con <code>c</code> o <code>compra</code>"
-          " antes de venderlos.</i>"
-      )
-      await update.message.reply_text(
-          "\n".join(lineas_error), parse_mode="HTML"
-      )
-      return
-
-    query_check_cliente = (
-        "SELECT id_cliente FROM clientes WHERE LOWER(nombre) LIKE LOWER(%s)"
-        " LIMIT 1;"
-    )
-    cur.execute(query_check_cliente, (f"%{cliente_nombre}%",))
-    res_c = cur.fetchone()
-
-    if res_c:
-      id_cliente = res_c[0]
-      etiqueta_cliente = "👤 <code>[CLIENTE REGISTRADO]</code>"
-    else:
-      query_add_cliente = (
-          "INSERT INTO clientes (nombre) VALUES (%s) RETURNING id_cliente;"
-      )
-      cur.execute(query_add_cliente, (cliente_nombre,))
-      id_cliente = cur.fetchone()[0]
-      etiqueta_cliente = "✨ <code>[NUEVO CLIENTE]</code>"
-
-    query_nueva_venta = (
-        "INSERT INTO ventas (id_cliente, tipo_pago) VALUES (%s, %s) RETURNING"
-        " id_venta;"
-    )
-    cur.execute(query_nueva_venta, (id_cliente, tipo_pago))
-    id_venta = cur.fetchone()[0]
-
-    total_venta = 0
-    lista_detalles_msg = []
-
-    for item in productos_encontrados:
-      query_detalle = """
-            INSERT INTO detalle_ventas (id_venta, id_producto, cantidad, precio_unitario)
-            VALUES (%s, %s, %s, %s);
-            """
-      cur.execute(
-          query_detalle,
-          (
-              id_venta,
-              item["id_producto"],
-              item["cantidad"],
-              item["precio_unitario"],
-          ),
-      )
-
-      query_descuento = """
-            UPDATE productos 
-            SET stock_actual = GREATEST(0, stock_actual - %s)
-            WHERE id_producto = %s 
-            RETURNING stock_actual;
-            """
-      cur.execute(query_descuento, (item["cantidad"], item["id_producto"]))
-      nuevo_stock = cur.fetchone()[0]
-
-      total_venta += item["subtotal"]
-      lista_detalles_msg.append(
-          f"• <b>{item['nombre_real']}</b> x{item['cantidad']} —"
-          f" <code>{formatear_cop(item['subtotal'])}</code> (<i>Quedan:"
-          f" {nuevo_stock} uds.</i>)"
-      )
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    msg = (
-        f"🎉 <b>¡Venta #{id_venta} Registrada Exitosamente!</b> 🎉\n\n"
-        f"👤 <b>Cliente:</b> {cliente_nombre} {etiqueta_cliente}\n"
-        f"💳 <b>Método de Pago:</b> {tipo_pago.capitalize()}\n\n"
-        "📋 <b>Productos Procesados:</b>\n"
-        + "\n".join(lista_detalles_msg)
-        + "\n\n"
-        f"💰 <b>TOTAL COBRADO:</b> <code>{formatear_cop(total_venta)}</code>"
-    )
-
-    admins = obtener_lista_admins()
-    for admin_id in admins:
-      enviar_mensaje_api(admin_id, enviar_mensaje_seguro(msg))
-
-  except Exception as e:
-    if conn:
-      conn.rollback()
-      conn.close()
-    logging.error(f"Error procesando venta: {e}")
-    await update.message.reply_text(
-        f"🔴 <b>Error al registrar venta:</b> {str(e)}", parse_mode="HTML"
-    )
-
-
-# -------------------------------------------------------------------
-# REGISTRO DE COMPRAS (c O compra)
-# -------------------------------------------------------------------
 async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
   texto = update.message.text.strip()
   lineas = [l.strip() for l in texto.split("\n") if l.strip()]
@@ -888,7 +893,7 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# MANIPULADOR ÚNICO DE MENSAJES DE TEXTO CON DESDUPLICACIÓN EN MEMORIA
+# MANIPULADOR DE MENSAJES DE TEXTO
 # -------------------------------------------------------------------
 async def procesar_mensaje_texto(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -933,7 +938,7 @@ async def procesar_mensaje_texto(
 
 
 # -------------------------------------------------------------------
-# COMANDO DE PRUEBA DE NOTIFICACIONES
+# PRUEBAS Y GENERADORES PDF
 # -------------------------------------------------------------------
 async def probar_notificaciones(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -954,9 +959,6 @@ async def probar_notificaciones(
   )
 
 
-# -------------------------------------------------------------------
-# GENERADORES DE PDF
-# -------------------------------------------------------------------
 def generar_pdf_dia_sync():
   query = """
     SELECT v.id_venta, v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Bogota' AS fecha, c.nombre AS cliente, v.tipo_pago, p.nombre AS producto, dv.cantidad, dv.precio_unitario, (dv.cantidad * dv.precio_unitario) AS subtotal
@@ -1485,7 +1487,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
       datos_mes = ventas_mes_sync(0)
       if datos_mes["ventas"] == 0:
         msg_final = (
-            "ℹ️ <b>No se encontraron ventas registradas en lo que va de este"
+            "ℹ️️ <b>No se encontraron ventas registradas en lo que va de este"
             " mes.</b>"
         )
         await query.message.reply_text(
@@ -1630,7 +1632,7 @@ def tarea_saludo_manana():
           )
         else:
           msg = (
-              "☀️ <b>¡Buenos días!</b> ☀️\n\nRecuerda que estoy aquí para"
+              "☀️ <b>¡Buenos días!</b> ☀️️\n\nRecuerda que estoy aquí para"
               " ayudarte a llevar tu negocio y vamos con toda el día de hoy 💪✨"
           )
 
@@ -1750,31 +1752,6 @@ scheduler.add_job(
 scheduler.start()
 
 
-# -------------------------------------------------------------------
-# COMANDO DE PRUEBA DE NOTIFICACIONES
-# -------------------------------------------------------------------
-async def probar_notificaciones(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-  admins = obtener_lista_admins()
-  await update.message.reply_text(
-      "🧪 <b>Iniciando prueba de notificaciones automáticas...</b>\nDestinatarios:"
-      f" <code>{admins}</code>",
-      parse_mode="HTML",
-  )
-  tarea_saludo_manana()
-  tarea_cierre_diario()
-  tarea_cierre_semanal()
-  tarea_cierre_mensual_automatico()
-  await update.message.reply_text(
-      "✅ <b>Prueba ejecutada exitosamente.</b> Revisa los chats.",
-      parse_mode="HTML",
-  )
-
-
-# -------------------------------------------------------------------
-# INICIALIZACIÓN GLOBAL DE HANDLERS
-# -------------------------------------------------------------------
 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
 ptb_app.add_handler(
@@ -1783,9 +1760,6 @@ ptb_app.add_handler(
 ptb_app.add_handler(MessageHandler(filters.ALL, procesar_mensaje_texto))
 
 
-# -------------------------------------------------------------------
-# FLASK Y WEBHOOK
-# -------------------------------------------------------------------
 @web_app.route("/", methods=["GET"])
 def home():
   return "Bot de Soulcerón Activo con Menú Interactivo."
