@@ -596,7 +596,7 @@ async def consultar_cliente(
 
 
 # -------------------------------------------------------------------
-# LÓGICA DE REGISTRO DE VENTAS (CERO DUPLICADOS / EXACTAMENTE 1 RESTA)
+# LÓGICA DE REGISTRO DE VENTAS (CERO DUPLICADOS Y LÍMITE DE STOCK >= 0)
 # -------------------------------------------------------------------
 async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
   texto = update.message.text.strip()
@@ -654,7 +654,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for prod_clean, cantidad in items_raw:
       query_check = """
-            SELECT id_producto, nombre, precio_venta 
+            SELECT id_producto, nombre, precio_venta, stock_actual
             FROM productos 
             WHERE LOWER(nombre) LIKE LOWER(%s) 
             ORDER BY 
@@ -673,6 +673,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "cantidad": cantidad,
             "precio_unitario": precio_v,
             "subtotal": cantidad * precio_v,
+            "stock_actual": prod_res[3],
         })
       else:
         productos_no_encontrados.append(prod_clean)
@@ -738,10 +739,10 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
           ),
       )
 
-      # Descuento exacto de las unidades solicitadas
+      # CANDADO ESTRICTO DE DESCUENTO EN BD (Impide valores inferiores a 0)
       query_descuento = """
             UPDATE productos 
-            SET stock_actual = stock_actual - %s 
+            SET stock_actual = GREATEST(0, stock_actual - %s)
             WHERE id_producto = %s 
             RETURNING stock_actual;
             """
@@ -769,7 +770,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 <b>TOTAL COBRADO:</b> <code>{formatear_cop(total_venta)}</code>"
     )
 
-    # Notificación enviada a la lista de administradores
     admins = obtener_lista_admins()
     for admin_id in admins:
       enviar_mensaje_api(admin_id, enviar_mensaje_seguro(msg))
@@ -877,7 +877,7 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# MANIPULADOR ÚNICO DE MENSAJES DE TEXTO (PUNTO CENTRAL DE ENTRADA)
+# MANIPULADOR ÚNICO DE MENSAJES DE TEXTO
 # -------------------------------------------------------------------
 async def procesar_mensaje_texto(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -888,19 +888,15 @@ async def procesar_mensaje_texto(
   texto = update.message.text.strip()
   primera_linea = texto.split("\n")[0].strip().lower()
 
-  # Normalización por si se envía con o sin '/'
   if primera_linea.startswith("/"):
     primera_linea = primera_linea[1:]
 
-  # Comando Venta: 'v' o 'venta'
   if primera_linea in ["v", "venta"]:
     await registrar_venta(update, context)
 
-  # Comando Compra: 'c' o 'compra'
   elif primera_linea in ["c", "compra"]:
     await registrar_compra(update, context)
 
-  # Comando Cliente: 'n' o 'nombre' o 'cliente'
   elif (
       primera_linea.startswith("n ")
       or primera_linea.startswith("nombre ")
@@ -908,11 +904,9 @@ async def procesar_mensaje_texto(
   ):
     await consultar_cliente(update, context)
 
-  # Comando Menú / Start: 'm' o 'menu' o 'start'
   elif primera_linea in ["m", "menu", "start"]:
     await start(update, context)
 
-  # Ayuda
   elif primera_linea in ["ayuda", "help"]:
     await ayuda(update, context)
 
@@ -940,7 +934,7 @@ async def probar_notificaciones(
 
 
 # -------------------------------------------------------------------
-# GENERADORES DE PDF (DIARIO, MENSUAL, SEMANAL, BODEGA Y AGOTADOS)
+# GENERADORES DE PDF
 # -------------------------------------------------------------------
 def generar_pdf_dia_sync():
   query = """
@@ -1609,7 +1603,7 @@ def tarea_saludo_manana():
       for admin_id in admins:
         if str(admin_id) == ID_ESPOSA:
           msg = (
-              "☀️ <b>¡Buenos días!</b> ☀️\n\nRecuerda que estoy aquí para"
+              "☀️ <b>¡Buenos días!</b> ☀️️\n\nRecuerda que estoy aquí para"
               " ayudarte a llevar tu negocio y vamos con toda el día de hoy, <b>Mi"
               " barrigona hermosa</b> 💖✨"
           )
@@ -1747,6 +1741,17 @@ scheduler.start()
 
 
 # -------------------------------------------------------------------
+# INICIALIZACIÓN GLOBAL DE TELEGRAM (EVITA RE-CREACIÓN EN CADA WEBHOOK)
+# -------------------------------------------------------------------
+ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
+ptb_app.add_handler(
+    CommandHandler("test_notificaciones", probar_notificaciones)
+)
+ptb_app.add_handler(MessageHandler(filters.ALL, procesar_mensaje_texto))
+
+
+# -------------------------------------------------------------------
 # FLASK Y WEBHOOK
 # -------------------------------------------------------------------
 @web_app.route("/", methods=["GET"])
@@ -1760,33 +1765,21 @@ def webhook():
     json_data = request.get_json(force=True)
 
     async def process():
-      ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-      # Handlers de Callbacks de Botones
-      ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
-
-      # Comando de prueba de notificaciones
-      ptb_app.add_handler(
-          CommandHandler("test_notificaciones", probar_notificaciones)
-      )
-
-      # Handler central para TODO mensaje de texto (con o sin '/')
-      ptb_app.add_handler(
-          MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje_texto)
-      )
-
       async with ptb_app:
         update = Update.de_json(json_data, ptb_app.bot)
         await ptb_app.process_update(update)
 
     import asyncio
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-      loop.run_until_complete(process())
-    finally:
-      loop.close()
+      loop = asyncio.get_running_loop()
+    except RuntimeError:
+      loop = None
+
+    if loop and loop.is_running():
+      loop.create_task(process())
+    else:
+      asyncio.run(process())
 
     return "ok", 200
 
