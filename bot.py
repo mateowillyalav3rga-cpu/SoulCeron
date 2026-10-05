@@ -203,7 +203,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
   mensaje = (
-      "🤖 <b>Formatos de Registro Simplificados (Sin '/' al inicio)</b>\n\n"
+      "🤖 <b>Formatos de Registro Simplificados (Con o sin '/')</b>\n\n"
       "📝 <b>Registrar Venta (Comando <code>v</code> o <code>venta</code>):</b>\n"
       "<pre>\n"
       "v\n"
@@ -437,8 +437,8 @@ def construir_comparativa_semanal():
 
 
 def construir_comparativa_mensual():
-  actual = ventas_mes_sync(1)  # Mes recién cerrado
-  anterior = ventas_mes_sync(2)  # Mes antepasado
+  actual = ventas_mes_sync(1)
+  anterior = ventas_mes_sync(2)
 
   def diff_str(val_act, val_ant):
     dif = val_act - val_ant
@@ -527,7 +527,6 @@ async def consultar_cliente(
 ):
   args = context.args
   if not args:
-    # Intentar extraer desde el texto del mensaje si no viene en args
     partes = update.message.text.strip().split(maxsplit=1)
     if len(partes) > 1:
       nombre_buscar = partes[1].strip()
@@ -597,46 +596,28 @@ async def consultar_cliente(
 
 
 # -------------------------------------------------------------------
-# REGISTRO DE VENTAS SIMPLIFICADO (v O venta) Y COMPRAS (c O compra)
+# LÓGICA DE REGISTRO DE VENTAS (CERO DUPLICADOS / EXACTAMENTE 1 RESTA)
 # -------------------------------------------------------------------
 async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
   texto = update.message.text.strip()
   lineas = [l.strip() for l in texto.split("\n") if l.strip()]
 
   if len(lineas) < 4:
-    cliente_match = re.search(r"Cliente:\s*(.+)", texto, re.IGNORECASE)
-    pago_match = re.search(r"Pago:\s*(.+)", texto, re.IGNORECASE)
-    productos_matches = re.findall(r"-\s*(.+?),\s*(\d+)", texto)
+    await update.message.reply_text(
+        "❌ <b>Formato de venta incorrecto.</b> Usa:\n\n"
+        "<pre>\n"
+        "v\n"
+        "Nombre Cliente\n"
+        "contado\n"
+        "Producto, Cantidad\n"
+        "Otro Producto, 2\n"
+        "</pre>",
+        parse_mode="HTML",
+    )
+    return
 
-    if not (cliente_match and pago_match and productos_matches):
-      msg_error = (
-          "❌ <b>Formato de venta incorrecto.</b> Usa:\n\n"
-          "<pre>\n"
-          "v\n"
-          "Nombre Cliente\n"
-          "contado\n"
-          "Producto, Cantidad\n"
-          "Otro Producto, 2\n"
-          "</pre>"
-      )
-      await update.message.reply_text(msg_error, parse_mode="HTML")
-      return
-    else:
-      cliente_nombre = cliente_match.group(1).strip()
-      tipo_pago = pago_match.group(1).strip().lower()
-      items_raw = productos_matches
-  else:
-    cliente_nombre = lineas[1]
-    tipo_pago = lineas[2].lower()
-    items_raw = []
-    for l in lineas[3:]:
-      l_clean = re.sub(r"^\s*-\s*", "", l)
-      parts = l_clean.split(",")
-      if len(parts) >= 2:
-        prod_p = ",".join(parts[:-1]).strip()
-        cant_p = parts[-1].strip()
-        if cant_p.isdigit():
-          items_raw.append((prod_p, int(cant_p)))
+  cliente_nombre = lineas[1]
+  tipo_pago = lineas[2].lower()
 
   if tipo_pago not in ["contado", "credito"]:
     await update.message.reply_text(
@@ -646,10 +627,20 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return
 
+  items_raw = []
+  for l in lineas[3:]:
+    l_clean = re.sub(r"^\s*-\s*", "", l)
+    parts = l_clean.split(",")
+    if len(parts) >= 2:
+      prod_p = ",".join(parts[:-1]).strip()
+      cant_p = parts[-1].strip()
+      if cant_p.isdigit() and int(cant_p) > 0:
+        items_raw.append((prod_p, int(cant_p)))
+
   if not items_raw:
     await update.message.reply_text(
-        "❌ No se reconocieron productos válidos. Revisa el formato de los"
-        " productos (Nombre, Cantidad).",
+        "❌ No se reconocieron productos válidos. Revisa el formato (Nombre,"
+        " Cantidad).",
         parse_mode="HTML",
     )
     return
@@ -747,7 +738,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
           ),
       )
 
-      # Descuento exacto de 1 unidad por venta y retorno del nuevo stock
+      # Descuento exacto de las unidades solicitadas
       query_descuento = """
             UPDATE productos 
             SET stock_actual = stock_actual - %s 
@@ -778,7 +769,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 <b>TOTAL COBRADO:</b> <code>{formatear_cop(total_venta)}</code>"
     )
 
-    # Envío automático del mensaje de confirmación a TODOS los administradores
+    # Notificación enviada a la lista de administradores
     admins = obtener_lista_admins()
     for admin_id in admins:
       enviar_mensaje_api(admin_id, enviar_mensaje_seguro(msg))
@@ -789,11 +780,13 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# -------------------------------------------------------------------
+# REGISTRO DE COMPRAS (c O compra)
+# -------------------------------------------------------------------
 async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
   texto = update.message.text.strip()
   lineas = [l.strip() for l in texto.split("\n") if l.strip()]
 
-  # Soporta renglones con o sin '-' al inicio
   items_raw = []
   inicio_idx = 1 if lineas[0].lower() in ["c", "compra", "/compra", "/c"] else 0
 
@@ -884,7 +877,7 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# MANIPULADOR DE MENSAJES DE TEXTO DIRECTO (SIN '/')
+# MANIPULADOR ÚNICO DE MENSAJES DE TEXTO (PUNTO CENTRAL DE ENTRADA)
 # -------------------------------------------------------------------
 async def procesar_mensaje_texto(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -895,21 +888,33 @@ async def procesar_mensaje_texto(
   texto = update.message.text.strip()
   primera_linea = texto.split("\n")[0].strip().lower()
 
-  # Comando de Venta: 'v' o 'venta'
+  # Normalización por si se envía con o sin '/'
+  if primera_linea.startswith("/"):
+    primera_linea = primera_linea[1:]
+
+  # Comando Venta: 'v' o 'venta'
   if primera_linea in ["v", "venta"]:
     await registrar_venta(update, context)
 
-  # Comando de Compra: 'c' o 'compra'
+  # Comando Compra: 'c' o 'compra'
   elif primera_linea in ["c", "compra"]:
     await registrar_compra(update, context)
 
-  # Comando de Cliente: 'n' o 'nombre'
-  elif primera_linea.startswith("n ") or primera_linea.startswith("nombre "):
+  # Comando Cliente: 'n' o 'nombre' o 'cliente'
+  elif (
+      primera_linea.startswith("n ")
+      or primera_linea.startswith("nombre ")
+      or primera_linea.startswith("cliente ")
+  ):
     await consultar_cliente(update, context)
 
-  # Comando de Menú: 'm' o 'menu'
-  elif primera_linea in ["m", "menu"]:
+  # Comando Menú / Start: 'm' o 'menu' o 'start'
+  elif primera_linea in ["m", "menu", "start"]:
     await start(update, context)
+
+  # Ayuda
+  elif primera_linea in ["ayuda", "help"]:
+    await ayuda(update, context)
 
 
 # -------------------------------------------------------------------
@@ -1677,7 +1682,7 @@ def tarea_cierre_semanal():
 def tarea_cierre_mensual_automatico():
   if TELEGRAM_TOKEN:
     try:
-      datos_mes_cerrado = ventas_mes_sync(1)  # Mes inmediatamente anterior
+      datos_mes_cerrado = ventas_mes_sync(1)
       msg_resumen = (
           "📈 <b>REPORTE AUTOMÁTICO MENSUAL (1° DEL MES - 8:00 AM)</b> 📈\n\n"
           f"{construir_mensaje_resumen_completo('Consolidado Mes Anterior', datos_mes_cerrado)}"
@@ -1757,26 +1762,15 @@ def webhook():
     async def process():
       ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-      # Handlers con / por compatibilidad
-      ptb_app.add_handler(CommandHandler("start", start))
-      ptb_app.add_handler(CommandHandler("menu", start))
-      ptb_app.add_handler(CommandHandler("m", start))
-      ptb_app.add_handler(CommandHandler("ayuda", ayuda))
-      ptb_app.add_handler(CommandHandler("v", registrar_venta))
-      ptb_app.add_handler(CommandHandler("venta", registrar_venta))
-      ptb_app.add_handler(CommandHandler("c", registrar_compra))
-      ptb_app.add_handler(CommandHandler("compra", registrar_compra))
-      ptb_app.add_handler(CommandHandler("n", consultar_cliente))
-      ptb_app.add_handler(CommandHandler("nombre", consultar_cliente))
-      ptb_app.add_handler(CommandHandler("cliente", consultar_cliente))
+      # Handlers de Callbacks de Botones
+      ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
+
+      # Comando de prueba de notificaciones
       ptb_app.add_handler(
           CommandHandler("test_notificaciones", probar_notificaciones)
       )
 
-      # Handlers de Callbacks de Botones
-      ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
-
-      # Handler de Mensajes de Texto Directo (Sin '/')
+      # Handler central para TODO mensaje de texto (con o sin '/')
       ptb_app.add_handler(
           MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje_texto)
       )
