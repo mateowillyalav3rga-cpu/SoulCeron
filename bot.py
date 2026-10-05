@@ -62,6 +62,60 @@ def get_db_connection():
   return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=10)
 
 
+# -------------------------------------------------------------------
+# INICIALIZACIÓN DE TABLA DE CONTROL DE DUPLICADOS EN BD
+# -------------------------------------------------------------------
+def inicializar_tabla_control():
+  try:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_updates_procesados (
+                update_id BIGINT PRIMARY KEY,
+                fecha_procesado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+    conn.commit()
+    cur.close()
+    conn.close()
+  except Exception as e:
+    logging.error(f"Error al verificar/crear tabla de control: {e}")
+
+
+# Ejecutar inicialización de tabla al arrancar
+inicializar_tabla_control()
+
+
+def registrar_y_validar_update_bd(update_id: int) -> bool:
+  """Devuelve True si el update_id ES NUEVO y lo registra.
+
+  Devuelve False si YA FUE PROCESADO previamente (evita duplicación exactas de
+  reintentos).
+  """
+  if not update_id:
+    return True
+  try:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+            INSERT INTO telegram_updates_procesados (update_id) 
+            VALUES (%s) 
+            ON CONFLICT (update_id) DO NOTHING 
+            RETURNING update_id;
+        """,
+        (update_id,),
+    )
+    res = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return res is not None
+  except Exception as e:
+    logging.error(f"Error registrando update_id {update_id} en BD: {e}")
+    return True
+
+
 def enviar_mensaje_api(chat_id: str, texto: str):
   url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
   payload = json.dumps(
@@ -252,7 +306,7 @@ def ventas_hoy_sync():
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito,
         COALESCE(SUM(dv.cantidad * p.costo_compra), 0) AS total_inversion,
-        COALESCE(SUM(dv.cantidad * (dv.precio_unitario - p.costo_compra)), 0) AS total_ganancia
+        COALESCE(SUM(CASE WHEN dv.precio_unitario - p.costo_compra > 0 THEN dv.cantidad * (dv.precio_unitario - p.costo_compra) ELSE 0 END), 0) AS total_ganancia
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
     JOIN productos p ON dv.id_producto = p.id_producto
@@ -305,7 +359,7 @@ def ventas_semana_sync(semana_offset=0):
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito,
         COALESCE(SUM(dv.cantidad * p.costo_compra), 0) AS total_inversion,
-        COALESCE(SUM(dv.cantidad * (dv.precio_unitario - p.costo_compra)), 0) AS ganancia_total
+        COALESCE(SUM(CASE WHEN dv.precio_unitario - p.costo_compra > 0 THEN dv.cantidad * (dv.precio_unitario - p.costo_compra) ELSE 0 END), 0) AS ganancia_total
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
     JOIN productos p ON dv.id_producto = p.id_producto
@@ -351,7 +405,7 @@ def ventas_mes_sync(mes_offset=0):
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'contado' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_contado,
         COALESCE(SUM(CASE WHEN v.tipo_pago = 'credito' THEN dv.cantidad * dv.precio_unitario ELSE 0 END), 0) AS total_credito,
         COALESCE(SUM(dv.cantidad * p.costo_compra), 0) AS total_inversion,
-        COALESCE(SUM(dv.cantidad * (dv.precio_unitario - p.costo_compra)), 0) AS ganancia_total
+        COALESCE(SUM(CASE WHEN dv.precio_unitario - p.costo_compra > 0 THEN dv.cantidad * (dv.precio_unitario - p.costo_compra) ELSE 0 END), 0) AS ganancia_total
     FROM ventas v
     JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
     JOIN productos p ON dv.id_producto = p.id_producto
@@ -596,7 +650,7 @@ async def consultar_cliente(
 
 
 # -------------------------------------------------------------------
-# LÓGICA DE REGISTRO DE VENTAS (CERO DUPLICADOS Y LÍMITE DE STOCK >= 0)
+# LÓGICA DE REGISTRO DE VENTAS (CERO TRIPLE EJECUCIÓN)
 # -------------------------------------------------------------------
 async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
   texto = update.message.text.strip()
@@ -739,7 +793,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
           ),
       )
 
-      # CANDADO ESTRICTO DE DESCUENTO EN BD (Impide valores inferiores a 0)
+      # DESCUENTO EXACTO DE 1 SOLA UNIDAD
       query_descuento = """
             UPDATE productos 
             SET stock_actual = GREATEST(0, stock_actual - %s)
@@ -877,12 +931,20 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# MANIPULADOR ÚNICO DE MENSAJES DE TEXTO
+# MANIPULADOR ÚNICO DE MENSAJES DE TEXTO CON CONTROL ATÓMICO EN BD
 # -------------------------------------------------------------------
 async def procesar_mensaje_texto(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
   if not update.message or not update.message.text:
+    return
+
+  # Control de id en la BD: Si ya fue insertado, rechaza peticiones repetidas al instante
+  if not registrar_y_validar_update_bd(update.update_id):
+    logging.info(
+        f"Update ID {update.update_id} rechazado por existir previamente en la"
+        " base de datos."
+    )
     return
 
   texto = update.message.text.strip()
@@ -1603,13 +1665,13 @@ def tarea_saludo_manana():
       for admin_id in admins:
         if str(admin_id) == ID_ESPOSA:
           msg = (
-              "☀️ <b>¡Buenos días!</b> ☀️️\n\nRecuerda que estoy aquí para"
+              "☀️ <b>¡Buenos días!</b> ☀️\n\nRecuerda que estoy aquí para"
               " ayudarte a llevar tu negocio y vamos con toda el día de hoy, <b>Mi"
               " barrigona hermosa</b> 💖✨"
           )
         else:
           msg = (
-              "☀️ <b>¡Buenos días!</b> ☀️\n\nRecuerda que estoy aquí para"
+              "☀️️ <b>¡Buenos días!</b> ☀️\n\nRecuerda que estoy aquí para"
               " ayudarte a llevar tu negocio y vamos con toda el día de hoy 💪✨"
           )
 
@@ -1701,23 +1763,15 @@ def tarea_cierre_mensual_automatico():
       logging.error(f"Error en reporte mensual automático: {e}")
 
 
-# Inicialización con zona horaria oficial de Colombia
+# Inicialización del Scheduler
 scheduler = BackgroundScheduler(timezone=COLOMBIA_TZ)
-
-# Keep-Alive cada 10 minutos
 scheduler.add_job(mantener_vivo, "interval", minutes=10)
-
-# Saludo de la mañana a las 7:00 AM (Hora Colombia)
 scheduler.add_job(
     tarea_saludo_manana, "cron", hour=7, minute=0, timezone=COLOMBIA_TZ
 )
-
-# Cierre Diario a las 7:00 PM / 19:00 hrs (Hora Colombia)
 scheduler.add_job(
     tarea_cierre_diario, "cron", hour=19, minute=0, timezone=COLOMBIA_TZ
 )
-
-# Cierre Semanal todos los domingos a las 8:00 PM / 20:00 hrs (Hora Colombia)
 scheduler.add_job(
     tarea_cierre_semanal,
     "cron",
@@ -1726,8 +1780,6 @@ scheduler.add_job(
     minute=0,
     timezone=COLOMBIA_TZ,
 )
-
-# Cierre Mensual el día 1 de cada mes a las 8:00 AM (Hora Colombia)
 scheduler.add_job(
     tarea_cierre_mensual_automatico,
     "cron",
@@ -1736,12 +1788,33 @@ scheduler.add_job(
     minute=0,
     timezone=COLOMBIA_TZ,
 )
-
 scheduler.start()
 
 
 # -------------------------------------------------------------------
-# INICIALIZACIÓN GLOBAL DE TELEGRAM (EVITA RE-CREACIÓN EN CADA WEBHOOK)
+# COMANDO DE PRUEBA DE NOTIFICACIONES
+# -------------------------------------------------------------------
+async def probar_notificaciones(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+  admins = obtener_lista_admins()
+  await update.message.reply_text(
+      "🧪 <b>Iniciando prueba de notificaciones automáticas...</b>\nDestinatarios:"
+      f" <code>{admins}</code>",
+      parse_mode="HTML",
+  )
+  tarea_saludo_manana()
+  tarea_cierre_diario()
+  tarea_cierre_semanal()
+  tarea_cierre_mensual_automatico()
+  await update.message.reply_text(
+      "✅ <b>Prueba ejecutada exitosamente.</b> Revisa los chats.",
+      parse_mode="HTML",
+  )
+
+
+# -------------------------------------------------------------------
+# INICIALIZACIÓN GLOBAL
 # -------------------------------------------------------------------
 ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
@@ -1763,6 +1836,14 @@ def home():
 def webhook():
   if request.method == "POST":
     json_data = request.get_json(force=True)
+    update_id = json_data.get("update_id")
+
+    # SI EL UPDATE_ID YA EXISTE EN LA BASE DE DATOS, RECHAZARLO INMEDIATAMENTE
+    if update_id and not registrar_y_validar_update_bd(update_id):
+      logging.info(
+          f"Update ID {update_id} descartado en webhook por duplicidad en BD."
+      )
+      return "ok", 200
 
     async def process():
       async with ptb_app:
