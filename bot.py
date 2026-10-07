@@ -878,11 +878,12 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📦 <b>Resumen de Reabastecimiento / Compras:</b>\n\n"
         + "\n\n".join(resúmenes)
     )
-    await update.message.reply_text(
-        enviar_mensaje_seguro(msg),
-        reply_markup=obtener_teclado_menu(),
-        parse_mode="HTML",
-    )
+    
+    # Envío de la confirmación a todos los administradores (tú y tu esposa)
+    admins = obtener_lista_admins()
+    for admin_id in admins:
+      enviar_mensaje_api(admin_id, enviar_mensaje_seguro(msg))
+
   except Exception as e:
     if conn:
       conn.rollback()
@@ -1487,7 +1488,7 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
       datos_mes = ventas_mes_sync(0)
       if datos_mes["ventas"] == 0:
         msg_final = (
-            "ℹ️️ <b>No se encontraron ventas registradas en lo que va de este"
+            "ℹ <b>No se encontraron ventas registradas en lo que va de este"
             " mes.</b>"
         )
         await query.message.reply_text(
@@ -1632,7 +1633,7 @@ def tarea_saludo_manana():
           )
         else:
           msg = (
-              "☀️ <b>¡Buenos días!</b> ☀️️\n\nRecuerda que estoy aquí para"
+              "☀️ <b>¡Buenos días!</b> ☀️\n\nRecuerda que estoy aquí para"
               " ayudarte a llevar tu negocio y vamos con toda el día de hoy 💪✨"
           )
 
