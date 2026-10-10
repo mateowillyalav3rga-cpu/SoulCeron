@@ -159,7 +159,7 @@ def formatear_cop(monto):
 
 
 # -------------------------------------------------------------------
-# MENÚ CON BOTONES INTERACTIVOS
+# MENÚ CON BOTONES INTERACTIVOS (ACTUALIZADO)
 # -------------------------------------------------------------------
 def obtener_teclado_menu():
   keyboard = [
@@ -178,6 +178,14 @@ def obtener_teclado_menu():
           ),
           InlineKeyboardButton(
               "🚫 Productos Agotados", callback_data="btn_stock_bajo"
+          ),
+      ],
+      [
+          InlineKeyboardButton(
+              "👥 Segmentación & Clientes", callback_data="btn_segmentacion"
+          ),
+          InlineKeyboardButton(
+              "⭐️ Productos & Combos", callback_data="btn_analisis_productos"
           ),
       ],
       [InlineKeyboardButton("❓ Ayuda / Formatos", callback_data="btn_ayuda")],
@@ -230,6 +238,9 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
       "🔍 <b>Consultar Cliente (Comando <code>n</code> o"
       " <code>nombre</code>):</b>\n"
       "<code>n Juan Pérez</code>\n\n"
+      "🔍 <b>Consultar Producto (Comando <code>p</code> o"
+      " <code>producto</code>):</b>\n"
+      "<code>p Labial</code>\n\n"
       "📱 <b>Abrir Menú Principal (Comando <code>m</code> o"
       " <code>menu</code>):</b>\n"
       "<code>m</code>"
@@ -245,7 +256,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# LÓGICA DE REGISTRO DE VENTA (REDISEÑADA DESDE CERO)
+# LÓGICA DE REGISTRO DE VENTA
 # -------------------------------------------------------------------
 async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
   texto = update.message.text.strip()
@@ -302,7 +313,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     productos_encontrados = []
     productos_no_encontrados = []
 
-    # 1. PASO A: Capturar información actual y stock exacto
     for prod_clean, cantidad_deseada in items_raw:
       query_check = """
             SELECT id_producto, nombre, precio_venta, stock_actual
@@ -347,7 +357,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
       )
       return
 
-    # 2. PASO B: Gestionar Cliente
     query_check_cliente = (
         "SELECT id_cliente FROM clientes WHERE LOWER(nombre) LIKE LOWER(%s)"
         " LIMIT 1;"
@@ -366,7 +375,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
       id_cliente = cur.fetchone()[0]
       etiqueta_cliente = "✨ <code>[NUEVO CLIENTE]</code>"
 
-    # 3. PASO C: Crear cabecera de la venta
     query_nueva_venta = (
         "INSERT INTO ventas (id_cliente, tipo_pago) VALUES (%s, %s) RETURNING"
         " id_venta;"
@@ -374,12 +382,10 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute(query_nueva_venta, (id_cliente, tipo_pago))
     id_venta = cur.fetchone()[0]
 
-    # 4. PASO D: Insertar detalle y ejecutar RESTA MATEMÁTICA PURA
     total_venta = 0.0
     lista_detalles_msg = []
 
     for item in productos_encontrados:
-      # Registramos el detalle de la venta
       query_detalle = """
             INSERT INTO detalle_ventas (id_venta, id_producto, cantidad, precio_unitario)
             VALUES (%s, %s, %s, %s);
@@ -394,12 +400,10 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
           ),
       )
 
-      # RESTA MATEMÁTICA EXPLÍCITA EN PYTHON:
       stock_existente = item["stock_inicial"]
       unidades_a_restar = item["cantidad_vendida"]
       nuevo_stock_calculado = max(0, stock_existente - unidades_a_restar)
 
-      # Asignación directa del nuevo stock
       query_actualizar_stock = """
             UPDATE productos 
             SET stock_actual = %s
@@ -441,6 +445,72 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Error registrando venta: {e}")
     await update.message.reply_text(
         f"🔴 <b>Error al registrar venta:</b> {str(e)}", parse_mode="HTML"
+    )
+
+
+# -------------------------------------------------------------------
+# LÓGICA DE BÚSQUEDA DE PRODUCTO POR NOMBRE
+# -------------------------------------------------------------------
+async def consultar_producto(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+  texto = update.message.text.strip()
+  partes = texto.split(maxsplit=1)
+
+  if len(partes) < 2:
+    await update.message.reply_text(
+        "❌ <b>Indica el nombre del producto.</b> Usa:\n<code>p Pomo</code> o"
+        " <code>producto Labial</code>",
+        parse_mode="HTML",
+    )
+    return
+
+  nombre_buscar = partes[1].strip()
+
+  query = """
+    SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre_empresa, 'Sin Proveedor')
+    FROM productos p
+    LEFT JOIN proveedores pr ON p.id_proveedor = pr.id_proveedor
+    WHERE LOWER(p.nombre) LIKE LOWER(%s)
+    ORDER BY LENGTH(p.nombre) ASC
+    LIMIT 5;
+    """
+  try:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(query, (f"%{nombre_buscar}%",))
+    resultados = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not resultados:
+      await update.message.reply_text(
+          f"🔍 No se encontraron productos coincidentes con"
+          f" <code>{nombre_buscar}</code>.",
+          parse_mode="HTML",
+      )
+      return
+
+    lineas = [
+        f"🔍 <b>Resultados para '<code>{nombre_buscar}</code>':</b>\n"
+    ]
+    for p_nom, stock, costo, precio, prov in resultados:
+      lineas.append(
+          f"📦 <b>{p_nom}</b>\n"
+          f"   └ Stock: <code>{stock} uds.</code> | Costo:"
+          f" <code>{formatear_cop(costo)}</code> | Venta:"
+          f" <code>{formatear_cop(precio)}</code>\n"
+          f"   └ Proveedor: <i>{prov}</i>\n"
+      )
+
+    await update.message.reply_text(
+        "\n".join(lineas),
+        reply_markup=obtener_teclado_menu(),
+        parse_mode="HTML",
+    )
+  except Exception as e:
+    await update.message.reply_text(
+        f"🔴 <b>Error al consultar producto:</b> {str(e)}", parse_mode="HTML"
     )
 
 
@@ -878,8 +948,7 @@ async def registrar_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📦 <b>Resumen de Reabastecimiento / Compras:</b>\n\n"
         + "\n\n".join(resúmenes)
     )
-    
-    # Envío de la confirmación a todos los administradores (tú y tu esposa)
+
     admins = obtener_lista_admins()
     for admin_id in admins:
       enviar_mensaje_api(admin_id, enviar_mensaje_seguro(msg))
@@ -930,6 +999,9 @@ async def procesar_mensaje_texto(
       or primera_linea.startswith("cliente ")
   ):
     await consultar_cliente(update, context)
+
+  elif primera_linea.startswith("p ") or primera_linea.startswith("producto "):
+    await consultar_producto(update, context)
 
   elif primera_linea in ["m", "menu", "start"]:
     await start(update, context)
@@ -1415,6 +1487,191 @@ def generar_pdf_agotados_sync():
 
 
 # -------------------------------------------------------------------
+# LÓGICA DE NUEVO BOTÓN 1: SEGMENTACIÓN DE CLIENTES
+# -------------------------------------------------------------------
+def consultar_segmentacion_sync():
+  conn = get_db_connection()
+  cur = conn.cursor()
+
+  # 1. Top 3 Clientes por Categoría usando window functions
+  query_top = """
+    WITH ranked_clientes AS (
+        SELECT 
+            nombre,
+            categoria_calculada,
+            total_compras,
+            (total_contado + total_credito) AS total_monto,
+            ROW_NUMBER() OVER (PARTITION BY categoria_calculada ORDER BY (total_contado + total_credito) DESC) as rn
+        FROM vista_clientes_segmentados
+        WHERE total_compras > 0
+    )
+    SELECT nombre, categoria_calculada, total_compras, total_monto
+    FROM ranked_clientes
+    WHERE rn <= 3
+    ORDER BY categoria_calculada ASC, total_monto DESC;
+    """
+  cur.execute(query_top)
+  top_clientes = cur.fetchall()
+
+  # 2. Clientes inactivos por más de un mes (>30 días)
+  query_inactivos = """
+    SELECT nombre, dias_sin_comprar, ultima_compra
+    FROM vista_clientes_segmentados
+    WHERE dias_sin_comprar > 30 OR ultima_compra IS NULL
+    ORDER BY dias_sin_comprar DESC NULLS LAST;
+    """
+  cur.execute(query_inactivos)
+  inactivos = cur.fetchall()
+
+  cur.close()
+  conn.close()
+
+  msg_lineas = ["👥 <b>REPORTE DE SEGMENTACIÓN Y CLIENTES</b> 👥\n"]
+
+  # Agrupar Top Clientes por Categoría
+  if top_clientes:
+    msg_lineas.append("🏆 <b>Top 3 Clientes por Categoría:</b>")
+    cats = {}
+    for nom, cat, cant, monto in top_clientes:
+      cats.setdefault(cat, []).append(
+          f"  • <b>{nom}</b> — {cant} compras |"
+          f" Total: <code>{formatear_cop(monto)}</code>"
+      )
+
+    for cat_name, lista in cats.items():
+      msg_lineas.append(f"\n🏷️ <b>Categoría {cat_name}:</b>")
+      msg_lineas.extend(lista)
+  else:
+    msg_lineas.append(
+        "ℹ️ <i>No se registran compras para clasificar el top de clientes.</i>"
+    )
+
+  # Clientes Inactivos
+  msg_lineas.append("\n" + "─" * 28 + "\n")
+  msg_lineas.append("⏳ <b>Clientes Inactivos (> 1 Mes sin comprar):</b>")
+
+  if inactivos:
+    for nom, dias, ult_fecha in inactivos:
+      if dias is not None:
+        dias_int = int(dias)
+        msg_lineas.append(
+            f"• <b>{nom}</b> — Hace <code>{dias_int} días</code>"
+        )
+      else:
+        msg_lineas.append(f"• <b>{nom}</b> — <i>Sin compras registradas</i>")
+  else:
+    msg_lineas.append("✨ <i>¡Excelente! Todos los clientes han comprado este último mes.</i>")
+
+  return "\n".join(msg_lineas)
+
+
+# -------------------------------------------------------------------
+# LÓGICA DE NUEVO BOTÓN 2: ANÁLISIS DE PRODUCTOS Y COMBOS
+# -------------------------------------------------------------------
+def consultar_analisis_productos_sync():
+  conn = get_db_connection()
+  cur = conn.cursor()
+
+  # 1. Top 3 Mayor Ganancia (Precio Venta - Costo Compra)
+  query_mejor_ganancia = """
+    SELECT nombre, costo_compra, precio_venta, (precio_venta - costo_compra) as ganancia_u
+    FROM productos
+    ORDER BY (precio_venta - costo_compra) DESC
+    LIMIT 3;
+    """
+  cur.execute(query_mejor_ganancia)
+  mejores = cur.fetchall()
+
+  # 2. Top 3 Peor Ganancia
+  query_peor_ganancia = """
+    SELECT nombre, costo_compra, precio_venta, (precio_venta - costo_compra) as ganancia_u
+    FROM productos
+    ORDER BY (precio_venta - costo_compra) ASC
+    LIMIT 3;
+    """
+  cur.execute(query_peor_ganancia)
+  peores = cur.fetchall()
+
+  # 3. Productos Estrella (Más veces vendidos / facturados)
+  query_estrellas = """
+    SELECT p.nombre, SUM(dv.cantidad) as total_unidades, COUNT(DISTINCT dv.id_venta) as total_facturas
+    FROM detalle_ventas dv
+    JOIN productos p ON dv.id_producto = p.id_producto
+    GROUP BY p.id_producto, p.nombre
+    ORDER BY total_unidades DESC
+    LIMIT 3;
+    """
+  cur.execute(query_estrellas)
+  estrellas = cur.fetchall()
+
+  # 4. Posibles Combos (Parejas de productos juntos en más de 5 facturas)
+  query_combos = """
+    SELECT p1.nombre as prod1, p2.nombre as prod2, COUNT(*) as veces_juntos
+    FROM detalle_ventas dv1
+    JOIN detalle_ventas dv2 ON dv1.id_venta = dv2.id_venta AND dv1.id_producto < dv2.id_producto
+    JOIN productos p1 ON dv1.id_producto = p1.id_producto
+    JOIN productos p2 ON dv2.id_producto = p2.id_producto
+    GROUP BY p1.nombre, p2.nombre
+    HAVING COUNT(*) > 5
+    ORDER BY veces_juntos DESC;
+    """
+  cur.execute(query_combos)
+  combos = cur.fetchall()
+
+  cur.close()
+  conn.close()
+
+  msg_lineas = ["📊 <b>ANÁLISIS DE PRODUCTOS Y COMBOS</b> 📊\n"]
+
+  # Mayor Ganancia
+  msg_lineas.append("💎 <b>Top 3 Productos con Mejor Ganancia Unitario:</b>")
+  for nom, costo, precio, gan in mejores:
+    msg_lineas.append(
+        f"• <b>{nom}</b> — Ganancia:"
+        f" <code>+{formatear_cop(gan)}</code>\n   └ Costo:"
+        f" {formatear_cop(costo)} | Venta: {formatear_cop(precio)}"
+    )
+
+  # Peor Ganancia
+  msg_lineas.append("\n⚠️ <b>Top 3 Productos con Menor Ganancia Unitario:</b>")
+  for nom, costo, precio, gan in peores:
+    msg_lineas.append(
+        f"• <b>{nom}</b> — Ganancia:"
+        f" <code>+{formatear_cop(gan)}</code>\n   └ Costo:"
+        f" {formatear_cop(costo)} | Venta: {formatear_cop(precio)}"
+    )
+
+  # Productos Estrella
+  msg_lineas.append("\n🌟 <b>Top 3 Productos Estrella (Más Vendidos):</b>")
+  if estrellas:
+    for nom, uds, facturas in estrellas:
+      msg_lineas.append(
+          f"• <b>{nom}</b> — <code>{uds} uds.</code> vendidas (en {facturas}"
+          " facturas)"
+      )
+  else:
+    msg_lineas.append("ℹ️ <i>Aún no hay suficientes ventas registradas.</i>")
+
+  # Posibles Combos
+  msg_lineas.append("\n" + "─" * 28 + "\n")
+  msg_lineas.append("🔥 <b>Posibles Combos Sugeridos:</b>")
+
+  if combos:
+    for p1, p2, veces in combos:
+      msg_lineas.append(
+          f"💡 <b>{p1}</b> + <b>{p2}</b>\n   └ Comprados juntos en"
+          f" <code>{veces} facturas</code>"
+      )
+  else:
+    msg_lineas.append(
+        "ℹ️ <i>No se encontraron combos (ningún par de productos supera las 5"
+        " facturas juntos).</i>"
+    )
+
+  return "\n".join(msg_lineas)
+
+
+# -------------------------------------------------------------------
 # HANDLER DE BOTONES (CALLBACK QUERY)
 # -------------------------------------------------------------------
 async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1593,6 +1850,28 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
               ),
           )
 
+      await query.message.reply_text(
+          "👇 <i>Selecciona una opción del menú para continuar:</i>",
+          reply_markup=obtener_teclado_menu(),
+          parse_mode="HTML",
+      )
+
+    elif query.data == "btn_segmentacion":
+      msg_seg = consultar_segmentacion_sync()
+      await query.message.reply_text(
+          enviar_mensaje_seguro(msg_seg), parse_mode="HTML"
+      )
+      await query.message.reply_text(
+          "👇 <i>Selecciona una opción del menú para continuar:</i>",
+          reply_markup=obtener_teclado_menu(),
+          parse_mode="HTML",
+      )
+
+    elif query.data == "btn_analisis_productos":
+      msg_prod = consultar_analisis_productos_sync()
+      await query.message.reply_text(
+          enviar_mensaje_seguro(msg_prod), parse_mode="HTML"
+      )
       await query.message.reply_text(
           "👇 <i>Selecciona una opción del menú para continuar:</i>",
           reply_markup=obtener_teclado_menu(),
