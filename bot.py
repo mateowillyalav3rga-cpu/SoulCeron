@@ -264,7 +264,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# REGISTRO RÁPIDO DE COMPRAS (EXCLUSIVO MAQUILLAJE POR TEXTO)
+# REGISTRO RÁPIDO DE COMPRAS (EXCLUSIVO MAQUILLAJE POR TEXTO - id_categoria = 1)
 # -------------------------------------------------------------------
 async def registrar_compra_maquillaje_rapida(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text.strip()
@@ -309,7 +309,7 @@ async def registrar_compra_maquillaje_rapida(update: Update, context: ContextTyp
         for prod_clean, cant, costo, precio in items_raw:
             query_update_p = """
                 UPDATE productos 
-                SET stock_actual = stock_actual + %s, costo_compra = %s, precio_venta = %s
+                SET stock_actual = stock_actual + %s, costo_compra = %s, precio_venta = %s, id_categoria = 1
                 WHERE LOWER(nombre) LIKE LOWER(%s)
                 RETURNING id_producto, nombre, stock_actual;
             """
@@ -318,8 +318,8 @@ async def registrar_compra_maquillaje_rapida(update: Update, context: ContextTyp
 
             if not res_p:
                 query_insert_p = """
-                    INSERT INTO productos (nombre, stock_actual, costo_compra, precio_venta)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO productos (nombre, stock_actual, costo_compra, precio_venta, id_categoria)
+                    VALUES (%s, %s, %s, %s, 1)
                     RETURNING id_producto, nombre, stock_actual;
                 """
                 cur.execute(query_insert_p, (prod_clean, cant, costo, precio))
@@ -574,7 +574,7 @@ async def cancelar_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # -------------------------------------------------------------------
-# EDITOR INTERACTIVO DE RECETAS / COMBOS CON PAGINACIÓN Y CREACIÓN
+# EDITOR INTERACTIVO DE RECETAS / COMBOS CON PAGINACIÓN Y FILTRO (id_categoria != 1)
 # -------------------------------------------------------------------
 async def mostrar_costos_recetas_paginado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -586,21 +586,12 @@ async def mostrar_costos_recetas_paginado(update: Update, context: ContextTypes.
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Excluye únicamente los productos individuales que son un solo ítem de Maquillaje (1:1 auto-creados).
-    # Permite mostrar Kits, Combos y productos de Repostería o con múltiples insumos/categorías.
+    # FILTRO ESTRICTO: Excluye todos los productos cuya id_categoria sea 1 (Maquillaje)
     cur.execute("""
         SELECT DISTINCT p.id_producto, p.nombre, p.precio_venta, COALESCE(v.costo_insumos_total, 0.0) as costo_insumos_total
         FROM productos p
         LEFT JOIN vista_costos_productos v ON p.id_producto = v.id_producto
-        WHERE p.id_producto NOT IN (
-            SELECT r.id_producto
-            FROM recetas r
-            JOIN insumos i ON r.id_insumo = i.id_insumo
-            JOIN categorias_insumos ci ON i.id_categoria_insumo = ci.id_categoria_insumo
-            WHERE LOWER(ci.nombre) = 'maquillaje'
-            GROUP BY r.id_producto
-            HAVING COUNT(r.id_insumo) = 1
-        )
+        WHERE (p.id_categoria != 1 OR p.id_categoria IS NULL)
         ORDER BY p.nombre ASC;
     """)
     prods = cur.fetchall()
@@ -637,7 +628,7 @@ async def mostrar_costos_recetas_paginado(update: Update, context: ContextTypes.
     msg = (
         f"💰 <b>Costos y Recetas / Combos & Kits</b> (Pág. {page + 1}/{total_paginas})\n\n"
         "Selecciona un producto o kit para ver/editar su receta, o crea uno nuevo:\n"
-        "<i>(Productos de maquillaje individual filtrados automáticamente)</i>"
+        "<i>(Excluidos productos de id_categoria = 1: Maquillaje)</i>"
     )
 
     try:
@@ -657,8 +648,8 @@ async def iniciar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE
         "📌 <i>Ejemplos:</i>\n"
         "• <code>Kit Navideño Especial, 85000, Kit Navideño</code>\n"
         "• <code>Combo Amor y Amistad #1, 45000, Kit Amor y Amistad</code>\n"
-        "• <code>Caja Mini Donas x12, 32000, Repostería</code>\n\n"
-        "💡 <i>Si la categoría no existe en el sistema, se creará automáticamente.</i>"
+        "• <code>Caja Mini Donas x12, 32000, Mini Donitas</code>\n\n"
+        "💡 <i>Si la categoría no existe en el sistema, se creará automáticamente en la tabla categorias.</i>"
     )
     await query.message.reply_text(msg, parse_mode="HTML")
     return ESTADO_CREAR_COMBO_DATOS
@@ -687,19 +678,21 @@ async def guardar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE
     cur = conn.cursor()
 
     try:
-        cur.execute("SELECT id_categoria_insumo FROM categorias_insumos WHERE LOWER(nombre) = LOWER(%s);", (cat_nombre,))
+        # Verificar o crear categoría en la tabla 'categorias'
+        cur.execute("SELECT id_categoria FROM categorias WHERE LOWER(nombre) = LOWER(%s);", (cat_nombre,))
         res_cat = cur.fetchone()
         if not res_cat:
-            cur.execute("INSERT INTO categorias_insumos (nombre) VALUES (%s) RETURNING id_categoria_insumo;", (cat_nombre,))
+            cur.execute("INSERT INTO categorias (nombre) VALUES (%s) RETURNING id_categoria;", (cat_nombre,))
             id_cat = cur.fetchone()[0]
         else:
             id_cat = res_cat[0]
 
+        # Crear el producto asignando su id_categoria correspondiente
         cur.execute("""
-            INSERT INTO productos (nombre, stock_actual, costo_compra, precio_venta)
-            VALUES (%s, 0, 0.0, %s)
+            INSERT INTO productos (nombre, stock_actual, costo_compra, precio_venta, id_categoria)
+            VALUES (%s, 0, 0.0, %s, %s)
             RETURNING id_producto;
-        """, (nom_combo, precio_v))
+        """, (nom_combo, precio_v, id_cat))
         id_prod = cur.fetchone()[0]
 
         conn.commit()
@@ -709,9 +702,9 @@ async def guardar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE
         msg = (
             f"🎉 <b>¡Nuevo Combo / Kit Creado Exitosamente!</b> 🎉\n\n"
             f"🎁 <b>Nombre:</b> {nom_combo}\n"
-            f"🏷️ <b>Categoría:</b> {cat_nombre}\n"
+            f"🏷️ <b>Categoría:</b> {cat_nombre} (ID: {id_cat})\n"
             f"🏷️ <b>Precio de Venta:</b> <code>{formatear_cop(precio_v)}</code>\n\n"
-            f"💡 <i>Ahora puedes seleccionarlo en 'Costos & Recetas' para agregarle sus empaques, insumos o cosméticos.</i>"
+            f"💡 <i>Ahora puedes seleccionarlo en 'Costos & Recetas' para agregarle sus empaques o insumos.</i>"
         )
         await update.message.reply_text(msg, parse_mode="HTML")
 
