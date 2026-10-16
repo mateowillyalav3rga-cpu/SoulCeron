@@ -165,7 +165,7 @@ def formatear_cop(monto):
 
 
 # -------------------------------------------------------------------
-# MENÚ CON BOTONES INTERACTIVOS (GENERALIZADO)
+# MENÚ CON BOTONES INTERACTIVOS REORGANIZADO
 # -------------------------------------------------------------------
 def obtener_teclado_menu():
     keyboard = [
@@ -174,24 +174,35 @@ def obtener_teclado_menu():
             InlineKeyboardButton("📦 Registrar Compra", callback_data="btn_menu_compras"),
         ],
         [
-            InlineKeyboardButton("📊 Inventario General", callback_data="btn_inventario_general"),
-            InlineKeyboardButton("💰 Costos & Recetas", callback_data="btn_costos_recetas"),
+            InlineKeyboardButton("📊 Balances (Hoy / Sem. / Mes)", callback_data="btn_menu_balances"),
+            InlineKeyboardButton("🏢 Valorización & Inventario", callback_data="btn_valorizacion"),
         ],
+        [
+            InlineKeyboardButton("💰 Costos & Recetas", callback_data="btn_costos_recetas"),
+            InlineKeyboardButton("👥 Segmentación & Clientes", callback_data="btn_segmentacion"),
+        ],
+        [
+            InlineKeyboardButton("⭐️ Productos & Combos", callback_data="btn_analisis_productos"),
+            InlineKeyboardButton("🚫 Productos Agotados", callback_data="btn_stock_bajo"),
+        ],
+        [
+            InlineKeyboardButton("❓ Ayuda / Formatos", callback_data="btn_ayuda"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def obtener_teclado_balances():
+    keyboard = [
         [
             InlineKeyboardButton("📊 Ventas Hoy", callback_data="btn_ventas_hoy"),
             InlineKeyboardButton("📅 Balance Semanal", callback_data="btn_ventas_semana"),
         ],
         [
             InlineKeyboardButton("🗓️ Balance Mensual", callback_data="btn_ventas_mes"),
-            InlineKeyboardButton("🏢 Valorización Bodega", callback_data="btn_valorizacion"),
         ],
         [
-            InlineKeyboardButton("👥 Segmentación & Clientes", callback_data="btn_segmentacion"),
-            InlineKeyboardButton("⭐️ Productos & Combos", callback_data="btn_analisis_productos"),
-        ],
-        [
-            InlineKeyboardButton("🚫 Productos Agotados", callback_data="btn_stock_bajo"),
-            InlineKeyboardButton("❓ Ayuda / Formatos", callback_data="btn_ayuda"),
+            InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="btn_menu_principal"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -202,7 +213,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"✨ <b>¡Hola! Bienvenido al asistente general de Soulcerón</b> ✨\n\n"
         f"📱 <b>Tu ID de Chat:</b> <code>{chat_id}</code>\n\n"
-        "Gestión unificada para <b>Repostería, Maquillaje, Empaques, Papelería y Stickers</b>.\n\n"
+        "Gestión unificada para <b>Repostería, Maquillaje, Empaques, Papelería y Kits/Combos</b>.\n\n"
         "👇 <i>Selecciona una opción del menú para comenzar:</i>"
     )
     if update.message:
@@ -294,7 +305,6 @@ async def registrar_compra_maquillaje_rapida(update: Update, context: ContextTyp
 
         resúmenes = []
         for prod_clean, cant, costo, precio in items_raw:
-            # 1. Producto Final
             query_update_p = """
                 UPDATE productos 
                 SET stock_actual = stock_actual + %s, costo_compra = %s, precio_venta = %s
@@ -315,7 +325,6 @@ async def registrar_compra_maquillaje_rapida(update: Update, context: ContextTyp
 
             id_prod, nom_prod, stock_p = res_p
 
-            # 2. Insumos (Categoría Maquillaje)
             query_update_i = """
                 UPDATE insumos 
                 SET stock_actual = stock_actual + %s, costo_compra = %s, cantidad_comprada = %s, categoria_insumo = 'Maquillaje'
@@ -336,7 +345,6 @@ async def registrar_compra_maquillaje_rapida(update: Update, context: ContextTyp
 
             id_ins = res_i[0]
 
-            # 3. Vincular receta auto 1:1
             cur.execute("""
                 INSERT INTO recetas (id_producto, id_insumo, cantidad_usada)
                 VALUES (%s, %s, 1.0)
@@ -564,7 +572,7 @@ async def cancelar_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # -------------------------------------------------------------------
-# EDITOR INTERACTIVO DE RECETAS / COMBOS
+# EDITOR INTERACTIVO DE RECETAS / COMBOS (EXCLUYE MAQUILLAJE INDIVIDUAL)
 # -------------------------------------------------------------------
 async def mostrar_costos_recetas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -572,10 +580,16 @@ async def mostrar_costos_recetas(update: Update, context: ContextTypes.DEFAULT_T
 
     conn = get_db_connection()
     cur = conn.cursor()
+
+    # Excluye productos de maquillaje individual pero mantiene repostería, kits, combos, etc.
     cur.execute("""
-        SELECT p.id_producto, p.nombre, p.precio_venta, v.costo_insumos_total, v.ganancia_estimada
+        SELECT DISTINCT p.id_producto, p.nombre, p.precio_venta, COALESCE(v.costo_insumos_total, 0.0) as costo_insumos_total
         FROM productos p
         LEFT JOIN vista_costos_productos v ON p.id_producto = v.id_producto
+        LEFT JOIN recetas r ON p.id_producto = r.id_producto
+        LEFT JOIN insumos i ON r.id_insumo = i.id_insumo
+        LEFT JOIN categorias_insumos ci ON i.id_categoria_insumo = ci.id_categoria_insumo
+        WHERE ci.nombre IS NULL OR LOWER(ci.nombre) != 'maquillaje'
         ORDER BY p.nombre ASC;
     """)
     prods = cur.fetchall()
@@ -583,13 +597,17 @@ async def mostrar_costos_recetas(update: Update, context: ContextTypes.DEFAULT_T
     conn.close()
 
     keyboard = []
-    for pid, pnom, precio, costo_i, gan in prods:
+    for pid, pnom, precio, costo_i in prods:
         c_i = float(costo_i) if costo_i is not None else 0.0
-        keyboard.append([InlineKeyboardButton(f"📝 {pnom} (Costo: {formatear_cop(c_i)})", callback_data=f"ver_receta_{pid}")])
+        keyboard.append([InlineKeyboardButton(f"📝 {pnom} (Costo Insumos: {formatear_cop(c_i)})", callback_data=f"ver_receta_{pid}")])
 
     keyboard.append([InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="btn_menu_principal")])
 
-    msg = "💰 <b>Costos y Recetas / Combos por Producto</b>\n\nSelecciona un producto para ver o editar su receta de insumos y empaques:"
+    msg = (
+        "💰 <b>Costos y Recetas / Combos & Kits</b>\n\n"
+        "Selecciona un producto o kit para ver o editar sus componentes, bolsas o empaques:\n"
+        "<i>(Los artículos de maquillaje individual han sido filtrados)</i>"
+    )
     await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
@@ -621,25 +639,25 @@ async def ver_detalle_receta(update: Update, context: ContextTypes.DEFAULT_TYPE)
     precio_fl = float(precio)
     ganancia = precio_fl - costo_total
 
-    lineas = [f"🍫 <b>Producto / Combo:</b> {pnom}\n" + "─"*30]
+    lineas = [f"🍫 <b>Producto / Kit / Combo:</b> {pnom}\n" + "─"*30]
     if not insumos_receta:
-        lineas.append("⚠️ <i>Este producto aún no tiene insumos ni empaques asociados.</i>")
+        lineas.append("⚠️ <i>Este producto aún no tiene insumos, artículos o empaques asociados.</i>")
     else:
         for iid, inom, cant, med, c_u, c_parcial in insumos_receta:
             lineas.append(f"• <b>{inom}:</b> {float(cant):,.2f} {med} (<code>{formatear_cop(c_parcial)}</code>)")
 
     lineas.append("─"*30)
-    lineas.append(f"💵 <b>Costo Total Insumos/Empaques:</b> <code>{formatear_cop(costo_total)}</code>")
+    lineas.append(f"💵 <b>Costo Total Ensamble:</b> <code>{formatear_cop(costo_total)}</code>")
     lineas.append(f"🏷️ <b>Precio de Venta:</b> <code>{formatear_cop(precio_fl)}</code>")
     lineas.append(f"📈 <b>Ganancia Estimada:</b> <code>{formatear_cop(ganancia)}</code>")
 
     keyboard = [
-        [InlineKeyboardButton("➕ Agregar Insumo / Producto", callback_data=f"rec_add_{pid}")],
+        [InlineKeyboardButton("➕ Agregar Insumo / Producto a este Kit", callback_data=f"rec_add_{pid}")],
         [
             InlineKeyboardButton("✏️ Modificar Cantidad / Peso", callback_data=f"rec_mod_{pid}"),
             InlineKeyboardButton("🗑️ Quitar Insumo", callback_data=f"rec_del_{pid}"),
         ],
-        [InlineKeyboardButton("🔙 Volver a Lista de Costos", callback_data="btn_costos_recetas")],
+        [InlineKeyboardButton("🔙 Volver a Lista de Recetas", callback_data="btn_costos_recetas")],
     ]
 
     await query.message.reply_text("\n".join(lineas), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -671,7 +689,7 @@ async def opciones_quitar_insumo_receta(update: Update, context: ContextTypes.DE
         keyboard.append([InlineKeyboardButton(f"🗑️ Quitar {inom}", callback_data=f"confirm_del_rec_{pid}_{iid}")])
     keyboard.append([InlineKeyboardButton("🔙 Volver a la Receta", callback_data=f"ver_receta_{pid}")])
 
-    await query.message.reply_text("Selecciona el insumo o producto que deseas retirar de la receta:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.message.reply_text("Selecciona el componente que deseas retirar de la receta/kit:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def ejecutar_quitar_insumo_receta(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -688,7 +706,7 @@ async def ejecutar_quitar_insumo_receta(update: Update, context: ContextTypes.DE
     cur.close()
     conn.close()
 
-    await query.message.reply_text("✅ Insumo eliminado de la receta exitosamente.")
+    await query.message.reply_text("✅ Insumo/Producto eliminado de la receta exitosamente.")
     query.data = f"ver_receta_{pid}"
     await ver_detalle_receta(update, context)
 
@@ -719,7 +737,7 @@ async def opciones_modificar_cantidad_receta(update: Update, context: ContextTyp
         keyboard.append([InlineKeyboardButton(f"✏️ {inom} (Actual: {float(cant)} {med})", callback_data=f"pedir_mod_cant_{pid}_{iid}")])
     keyboard.append([InlineKeyboardButton("🔙 Volver a la Receta", callback_data=f"ver_receta_{pid}")])
 
-    await query.message.reply_text("Selecciona el insumo al que deseas cambiarle la cantidad o peso:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.message.reply_text("Selecciona el insumo o producto al que deseas cambiarle la cantidad/peso:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def pedir_nueva_cantidad_receta(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -738,7 +756,7 @@ async def pedir_nueva_cantidad_receta(update: Update, context: ContextTypes.DEFA
     cur.close()
     conn.close()
 
-    msg = f"✏️ <b>Modificar Cantidad/Peso</b>\n\nInsumo: <b>{inom}</b>\nUnidad: {med}\n\nEscribe el nuevo valor a utilizar en este producto:"
+    msg = f"✏️ <b>Modificar Cantidad/Peso</b>\n\nInsumo: <b>{inom}</b>\nUnidad: {med}\n\nEscribe el nuevo valor a utilizar:"
     await query.message.reply_text(msg, parse_mode="HTML")
     return ESTADO_EDITAR_CANTIDAD
 
@@ -783,7 +801,7 @@ async def opciones_agregar_insumo_receta(update: Update, context: ContextTypes.D
         keyboard.append([InlineKeyboardButton(f"➕ [{cat}] {inom} ({med})", callback_data=f"sel_add_ins_{pid}_{iid}")])
     keyboard.append([InlineKeyboardButton("🔙 Volver a la Receta", callback_data=f"ver_receta_{pid}")])
 
-    await query.message.reply_text("Selecciona el insumo o producto que deseas agregar a este ensamble/combo:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.message.reply_text("Selecciona el insumo o producto que deseas agregar a este ensamble/kit:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def pedir_cantidad_agregar_receta(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -802,7 +820,7 @@ async def pedir_cantidad_agregar_receta(update: Update, context: ContextTypes.DE
     cur.close()
     conn.close()
 
-    msg = f"➕ <b>Agregar a la Receta:</b> {inom}\n📏 <b>Unidad:</b> {med}\n\nEscribe la cantidad que consume este producto:"
+    msg = f"➕ <b>Agregar a la Receta:</b> {inom}\n📏 <b>Unidad:</b> {med}\n\nEscribe la cantidad que consume este producto/kit:"
     await query.message.reply_text(msg, parse_mode="HTML")
     return ESTADO_AGREGAR_CANTIDAD
 
@@ -825,7 +843,7 @@ async def guardar_agregar_insumo_receta(update: Update, context: ContextTypes.DE
         cur.close()
         conn.close()
 
-        await update.message.reply_text("✅ Insumo agregado a la receta exitosamente.")
+        await update.message.reply_text("✅ Componente agregado a la receta exitosamente.")
         return ConversationHandler.END
     except ValueError:
         await update.message.reply_text("❌ Ingresa un número válido.")
@@ -980,7 +998,6 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """
             cur.execute(query_actualizar_stock, (nuevo_stock_calculado, item["id_producto"]))
 
-            # Descontar de insumos los materiales de la receta
             cur.execute("""
                 UPDATE insumos 
                 SET stock_actual = GREATEST(0, stock_actual - (%s * r.cantidad_usada))
@@ -1021,7 +1038,7 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# LÓGICA DE BÚSQUEDA Y INVENTARIO GENERAL
+# LÓGICA DE BÚSQUEDA Y CONSULTAS
 # -------------------------------------------------------------------
 async def consultar_producto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text.strip()
@@ -1074,44 +1091,6 @@ async def consultar_producto(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     except Exception as e:
         await update.message.reply_text(f"🔴 <b>Error al consultar producto:</b> {str(e)}", parse_mode="HTML")
-
-
-async def consultar_inventario_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT i.nombre, i.stock_actual, i.unidad_medida, i.costo_unitario, c.nombre as categoria
-        FROM insumos i
-        LEFT JOIN categorias_insumos c ON i.id_categoria_insumo = c.id_categoria_insumo
-        ORDER BY c.nombre ASC, i.nombre ASC;
-    """)
-    insumos = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    if not insumos:
-        await query.message.reply_text("ℹ️ No hay insumos registrados en el inventario.")
-        return
-
-    cats = {}
-    for inom, stock, med, c_u, cnom in insumos:
-        cats.setdefault(cnom or "Sin Categoría", []).append(
-            f"• <b>{inom}:</b> <code>{float(stock):,.2f} {med}</code> (Costo U.: <code>{formatear_cop(c_u or 0)}</code>)"
-        )
-
-    lineas = ["📊 <b>INVENTARIO GENERAL DE INSUMOS Y MATERIA PRIMA</b>\n"]
-    for cnom, lista in cats.items():
-        lineas.append(f"\n📂 <b>Categoría {cnom}:</b>")
-        lineas.extend(lista)
-
-    await query.message.reply_text(
-        enviar_mensaje_seguro("\n".join(lineas)),
-        reply_markup=obtener_teclado_menu(),
-        parse_mode="HTML",
-    )
 
 
 # -------------------------------------------------------------------
@@ -1361,12 +1340,12 @@ def valorizacion_sync():
     return c, v
 
 
-def inventario_completo_sync():
+def insumos_categorizados_sync():
     query = """
-        SELECT p.nombre, p.stock_actual, p.costo_compra, p.precio_venta, COALESCE(pr.nombre_empresa, 'Sin Proveedor') AS proveedor
-        FROM productos p
-        LEFT JOIN proveedores pr ON p.id_proveedor = pr.id_proveedor
-        ORDER BY p.nombre ASC;
+        SELECT i.nombre, i.stock_actual, i.unidad_medida, i.costo_unitario, (i.stock_actual * i.costo_unitario) as costo_total_insumo, COALESCE(c.nombre, 'Sin Categoría') as categoria
+        FROM insumos i
+        LEFT JOIN categorias_insumos c ON i.id_categoria_insumo = c.id_categoria_insumo
+        ORDER BY c.nombre ASC, i.nombre ASC;
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -1698,9 +1677,9 @@ def generar_pdf_semana_sync():
     return buffer
 
 
-def generar_pdf_valorizacion_sync():
-    productos = inventario_completo_sync()
-    if not productos:
+def generar_pdf_valorizacion_y_categorizado_sync():
+    insumos = insumos_categorizados_sync()
+    if not insumos:
         return None
 
     buffer = io.BytesIO()
@@ -1715,61 +1694,59 @@ def generar_pdf_valorizacion_sync():
     sub_style = ParagraphStyle(
         "SubStyle", parent=styles["Normal"], fontName="Helvetica", fontSize=9, textColor=colors.gray, spaceAfter=15
     )
+    cat_header_style = ParagraphStyle(
+        "CatHeaderStyle", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=11, textColor=colors.HexColor("#AD1457"), spaceBefore=10, spaceAfter=5
+    )
 
     now_co = datetime.now(COLOMBIA_TZ)
     elements = [
-        Paragraph("Soulcerón - Valorización Completa de Bodega", titulo_style),
+        Paragraph("Soulcerón - Inventario Categorizado y Valorización de Insumos", titulo_style),
         Paragraph(f"Generado el: {now_co.strftime('%Y-%m-%d %H:%M:%S')}", sub_style),
     ]
 
-    tabla_data = [["Producto", "Stock", "Costo U.", "Costo Total", "Precio V.", "Venta Total", "Proveedor"]]
-    total_costo_inv = 0.0
-    total_venta_pot = 0.0
+    # Agrupar por Categoría
+    categorizados = {}
+    total_general_costo = 0.0
 
-    for nombre, stock, costo, precio, proveedor in productos:
-        c_fl = float(costo)
-        p_fl = float(precio)
-        costo_total = stock * c_fl
-        venta_total = stock * p_fl
-        total_costo_inv += costo_total
-        total_venta_pot += venta_total
+    for inom, stock, med, c_u, c_tot, cat_nombre in insumos:
+        stock_fl = float(stock)
+        c_u_fl = float(c_u) if c_u else 0.0
+        c_tot_fl = float(c_tot) if c_tot else (stock_fl * c_u_fl)
+        total_general_costo += c_tot_fl
 
-        tabla_data.append([
-            str(nombre),
-            str(stock),
-            formatear_cop(c_fl),
-            formatear_cop(costo_total),
-            formatear_cop(p_fl),
-            formatear_cop(venta_total),
-            str(proveedor),
+        categorizados.setdefault(cat_nombre, []).append([
+            str(inom),
+            f"{stock_fl:,.2f} {med}",
+            formatear_cop(c_u_fl),
+            formatear_cop(c_tot_fl),
         ])
 
-    ganancia_potencial = total_venta_pot - total_costo_inv
-    tabla_data.append([
-        "TOTALES:",
-        "",
-        "",
-        formatear_cop(total_costo_inv),
-        "",
-        formatear_cop(total_venta_pot),
-        f"Ganancia: {formatear_cop(ganancia_potencial)}",
-    ])
+    for cat_nom, lista_items in categorizados.items():
+        elements.append(Paragraph(f"📂 <b>Categoría: {cat_nom}</b>", cat_header_style))
+        
+        tabla_data = [["Insumo", "Stock Actual", "Costo U.", "Costo Total Insumo"]]
+        subtotal_cat = 0.0
 
-    t = Table(tabla_data, colWidths=[120, 35, 65, 75, 65, 75, 69])
-    t.setStyle(
-        TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F8BBD0")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#880E4F")),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E0E0E0")),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F5F5F5")),
-        ])
-    )
+        for row in lista_items:
+            tabla_data.append(row)
 
-    elements.append(t)
+        t = Table(tabla_data, colWidths=[200, 100, 110, 110])
+        t.setStyle(
+            TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F8BBD0")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#880E4F")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 5),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E0E0E0")),
+            ])
+        )
+        elements.append(t)
+
+    # Resumen Final
+    p_total = Paragraph(f"<br/><br/><b>COSTO TOTAL VALORIZADO DE INSUMOS EN BODEGA: {formatear_cop(total_general_costo)}</b>", titulo_style)
+    elements.append(p_total)
+
     doc.build(elements)
     buffer.seek(0)
     return buffer
@@ -2012,8 +1989,9 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("compra_cat_"):
             await seleccionar_insumo_compra(update, context)
 
-        elif data == "btn_inventario_general":
-            await consultar_inventario_general(update, context)
+        elif data == "btn_menu_balances":
+            msg = "📊 <b>Módulo de Balances Financieros</b>\n\nSelecciona el periodo que deseas consultar:"
+            await query.message.reply_text(msg, reply_markup=obtener_teclado_balances(), parse_mode="HTML")
 
         elif data == "btn_costos_recetas":
             await mostrar_costos_recetas(update, context)
@@ -2050,8 +2028,8 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             await query.message.reply_text(
-                "👇 <i>Selecciona una opción del menú para continuar:</i>",
-                reply_markup=obtener_teclado_menu(),
+                "👇 <i>Selecciona una opción para continuar:</i>",
+                reply_markup=obtener_teclado_balances(),
                 parse_mode="HTML",
             )
 
@@ -2076,8 +2054,8 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
 
             await query.message.reply_text(
-                "👇 <i>Selecciona una opción del menú para continuar:</i>",
-                reply_markup=obtener_teclado_menu(),
+                "👇 <i>Selecciona una opción para continuar:</i>",
+                reply_markup=obtener_teclado_balances(),
                 parse_mode="HTML",
             )
 
@@ -2102,35 +2080,33 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
 
             await query.message.reply_text(
-                "👇 <i>Selecciona una opción del menú para continuar:</i>",
-                reply_markup=obtener_teclado_menu(),
+                "👇 <i>Selecciona una opción para continuar:</i>",
+                reply_markup=obtener_teclado_balances(),
                 parse_mode="HTML",
             )
 
         elif data == "btn_valorizacion":
             costo, venta = valorizacion_sync()
             ganancia_est = venta - costo
-            if costo == 0 and venta == 0:
-                msg = "ℹ️ <b>No se encontraron productos registrados en inventario para calcular la valorización.</b>"
-                await query.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="HTML")
-            else:
-                msg = (
-                    "🏢 <b>Valorización de Bodega</b>\n\n"
-                    f"💵 <b>Costo Invertido:</b> <code>{formatear_cop(costo)}</code>\n"
-                    f"📈 <b>Valor Potencial de Venta:</b> <code>{formatear_cop(venta)}</code>\n"
-                    f"💎 <b>Ganancia Potencial Estimada:</b> <code>{formatear_cop(ganancia_est)}</code>\n\n"
-                    "📄 <i>Adjunto encontrarás el reporte PDF completo del inventario.</i>"
-                )
-                pdf_buffer = generar_pdf_valorizacion_sync()
-                now_co = datetime.now(COLOMBIA_TZ)
+            
+            msg = (
+                "🏢 <b>Valorización & Inventario General de Bodega</b>\n\n"
+                f"💵 <b>Costo General Invertido:</b> <code>{formatear_cop(costo)}</code>\n"
+                f"📈 <b>Precio / Valor Potencial Venta:</b> <code>{formatear_cop(venta)}</code>\n"
+                f"💎 <b>Ganancia Potencial Estimada:</b> <code>{formatear_cop(ganancia_est)}</code>\n\n"
+                "📄 <i>Adjunto encontrarás el reporte PDF con el inventario completo bien categorizado.</i>"
+            )
+            
+            pdf_buffer = generar_pdf_valorizacion_y_categorizado_sync()
+            now_co = datetime.now(COLOMBIA_TZ)
 
-                await query.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="HTML")
-                if pdf_buffer:
-                    pdf_buffer.seek(0)
-                    await query.message.reply_document(
-                        document=pdf_buffer,
-                        filename=f"Valorizacion_Bodega_{now_co.strftime('%d_%m_%Y')}.pdf",
-                    )
+            await query.message.reply_text(enviar_mensaje_seguro(msg), parse_mode="HTML")
+            if pdf_buffer:
+                pdf_buffer.seek(0)
+                await query.message.reply_document(
+                    document=pdf_buffer,
+                    filename=f"Inventario_Categorizado_{now_co.strftime('%d_%m_%Y')}.pdf",
+                )
 
             await query.message.reply_text(
                 "👇 <i>Selecciona una opción del menú para continuar:</i>",
