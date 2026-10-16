@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import math
 import os
 import re
 import urllib.parse
@@ -46,6 +47,7 @@ UPDATES_PROCESADOS = set()
 ESTADO_CANTIDAD_COSTO = 1
 ESTADO_EDITAR_CANTIDAD = 2
 ESTADO_AGREGAR_CANTIDAD = 3
+ESTADO_CREAR_COMBO_DATOS = 4
 
 
 def obtener_lista_admins():
@@ -178,7 +180,7 @@ def obtener_teclado_menu():
             InlineKeyboardButton("🏢 Valorización & Inventario", callback_data="btn_valorizacion"),
         ],
         [
-            InlineKeyboardButton("💰 Costos & Recetas", callback_data="btn_costos_recetas"),
+            InlineKeyboardButton("💰 Costos & Recetas", callback_data="recetas_page_0"),
             InlineKeyboardButton("👥 Segmentación & Clientes", callback_data="btn_segmentacion"),
         ],
         [
@@ -372,7 +374,7 @@ async def registrar_compra_maquillaje_rapida(update: Update, context: ContextTyp
 
 
 # -------------------------------------------------------------------
-# REGISTRO DE COMPRAS INTERACTIVO DESDE MENÚ (TODAS LAS CATEGORÍAS)
+# REGISTRO DE COMPRAS INTERACTIVO DESDE MENÚ
 # -------------------------------------------------------------------
 async def mostrar_categorias_compras(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -572,43 +574,158 @@ async def cancelar_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # -------------------------------------------------------------------
-# EDITOR INTERACTIVO DE RECETAS / COMBOS (EXCLUYE MAQUILLAJE INDIVIDUAL)
+# EDITOR INTERACTIVO DE RECETAS / COMBOS CON PAGINACIÓN Y CREACIÓN
 # -------------------------------------------------------------------
-async def mostrar_costos_recetas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def mostrar_costos_recetas_paginado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    data = query.data
+    page = int(data.replace("recetas_page_", "")) if data.startswith("recetas_page_") else 0
 
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Excluye productos de maquillaje individual pero mantiene repostería, kits, combos, etc.
+    # Excluye únicamente los productos individuales que son un solo ítem de Maquillaje (1:1 auto-creados).
+    # Permite mostrar Kits, Combos y productos de Repostería o con múltiples insumos/categorías.
     cur.execute("""
         SELECT DISTINCT p.id_producto, p.nombre, p.precio_venta, COALESCE(v.costo_insumos_total, 0.0) as costo_insumos_total
         FROM productos p
         LEFT JOIN vista_costos_productos v ON p.id_producto = v.id_producto
-        LEFT JOIN recetas r ON p.id_producto = r.id_producto
-        LEFT JOIN insumos i ON r.id_insumo = i.id_insumo
-        LEFT JOIN categorias_insumos ci ON i.id_categoria_insumo = ci.id_categoria_insumo
-        WHERE ci.nombre IS NULL OR LOWER(ci.nombre) != 'maquillaje'
+        WHERE p.id_producto NOT IN (
+            SELECT r.id_producto
+            FROM recetas r
+            JOIN insumos i ON r.id_insumo = i.id_insumo
+            JOIN categorias_insumos ci ON i.id_categoria_insumo = ci.id_categoria_insumo
+            WHERE LOWER(ci.nombre) = 'maquillaje'
+            GROUP BY r.id_producto
+            HAVING COUNT(r.id_insumo) = 1
+        )
         ORDER BY p.nombre ASC;
     """)
     prods = cur.fetchall()
     cur.close()
     conn.close()
 
-    keyboard = []
-    for pid, pnom, precio, costo_i in prods:
+    items_por_pagina = 8
+    total_items = len(prods)
+    total_paginas = math.ceil(total_items / items_por_pagina) if total_items > 0 else 1
+
+    start_idx = page * items_por_pagina
+    end_idx = start_idx + items_por_pagina
+    prods_page = prods[start_idx:end_idx]
+
+    keyboard = [
+        [InlineKeyboardButton("✨ Crear Nuevo Combo / Kit", callback_data="btn_crear_combo")]
+    ]
+
+    for pid, pnom, precio, costo_i in prods_page:
         c_i = float(costo_i) if costo_i is not None else 0.0
-        keyboard.append([InlineKeyboardButton(f"📝 {pnom} (Costo Insumos: {formatear_cop(c_i)})", callback_data=f"ver_receta_{pid}")])
+        keyboard.append([InlineKeyboardButton(f"📝 {pnom} (Costo: {formatear_cop(c_i)})", callback_data=f"ver_receta_{pid}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"recetas_page_{page - 1}"))
+    if page < total_paginas - 1:
+        nav_row.append(InlineKeyboardButton("Siguiente ➡️", callback_data=f"recetas_page_{page + 1}"))
+    
+    if nav_row:
+        keyboard.append(nav_row)
 
     keyboard.append([InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="btn_menu_principal")])
 
     msg = (
-        "💰 <b>Costos y Recetas / Combos & Kits</b>\n\n"
-        "Selecciona un producto o kit para ver o editar sus componentes, bolsas o empaques:\n"
-        "<i>(Los artículos de maquillaje individual han sido filtrados)</i>"
+        f"💰 <b>Costos y Recetas / Combos & Kits</b> (Pág. {page + 1}/{total_paginas})\n\n"
+        "Selecciona un producto o kit para ver/editar su receta, o crea uno nuevo:\n"
+        "<i>(Productos de maquillaje individual filtrados automáticamente)</i>"
     )
-    await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+    try:
+        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except Exception:
+        await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def iniciar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    msg = (
+        "✨ <b>Crear Nuevo Combo, Kit o Producto Compuesto</b>\n\n"
+        "Envía los datos en el siguiente formato:\n"
+        "<code>NombreCombo, PrecioVenta, NombreCategoria</code>\n\n"
+        "📌 <i>Ejemplos:</i>\n"
+        "• <code>Kit Navideño Especial, 85000, Kit Navideño</code>\n"
+        "• <code>Combo Amor y Amistad #1, 45000, Kit Amor y Amistad</code>\n"
+        "• <code>Caja Mini Donas x12, 32000, Repostería</code>\n\n"
+        "💡 <i>Si la categoría no existe en el sistema, se creará automáticamente.</i>"
+    )
+    await query.message.reply_text(msg, parse_mode="HTML")
+    return ESTADO_CREAR_COMBO_DATOS
+
+
+async def guardar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text.strip()
+    partes = [p.strip() for p in texto.split(",")]
+
+    if len(partes) < 3:
+        await update.message.reply_text(
+            "❌ Formato incorrecto. Debes enviar: <code>NombreCombo, PrecioVenta, Categoria</code>",
+            parse_mode="HTML",
+        )
+        return ESTADO_CREAR_COMBO_DATOS
+
+    nom_combo, precio_s, cat_nombre = partes[0], partes[1], partes[2]
+
+    try:
+        precio_v = float(precio_s)
+    except ValueError:
+        await update.message.reply_text("❌ El precio de venta debe ser un número válido.")
+        return ESTADO_CREAR_COMBO_DATOS
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("SELECT id_categoria_insumo FROM categorias_insumos WHERE LOWER(nombre) = LOWER(%s);", (cat_nombre,))
+        res_cat = cur.fetchone()
+        if not res_cat:
+            cur.execute("INSERT INTO categorias_insumos (nombre) VALUES (%s) RETURNING id_categoria_insumo;", (cat_nombre,))
+            id_cat = cur.fetchone()[0]
+        else:
+            id_cat = res_cat[0]
+
+        cur.execute("""
+            INSERT INTO productos (nombre, stock_actual, costo_compra, precio_venta)
+            VALUES (%s, 0, 0.0, %s)
+            RETURNING id_producto;
+        """, (nom_combo, precio_v))
+        id_prod = cur.fetchone()[0]
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        msg = (
+            f"🎉 <b>¡Nuevo Combo / Kit Creado Exitosamente!</b> 🎉\n\n"
+            f"🎁 <b>Nombre:</b> {nom_combo}\n"
+            f"🏷️ <b>Categoría:</b> {cat_nombre}\n"
+            f"🏷️ <b>Precio de Venta:</b> <code>{formatear_cop(precio_v)}</code>\n\n"
+            f"💡 <i>Ahora puedes seleccionarlo en 'Costos & Recetas' para agregarle sus empaques, insumos o cosméticos.</i>"
+        )
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+        keyboard = [[InlineKeyboardButton("📝 Configurar Receta de este Kit", callback_data=f"ver_receta_{id_prod}")]]
+        await update.message.reply_text("👇 Selecciona para agregar sus componentes:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+        return ConversationHandler.END
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+            conn.close()
+        await update.message.reply_text(f"🔴 Error al crear el combo: {str(e)}")
+        return ConversationHandler.END
 
 
 async def ver_detalle_receta(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -652,12 +769,12 @@ async def ver_detalle_receta(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lineas.append(f"📈 <b>Ganancia Estimada:</b> <code>{formatear_cop(ganancia)}</code>")
 
     keyboard = [
-        [InlineKeyboardButton("➕ Agregar Insumo / Producto a este Kit", callback_data=f"rec_add_{pid}")],
+        [InlineKeyboardButton("➕ Agregar Insumo / Producto a este Kit", callback_data=f"rec_add_page_{pid}_0")],
         [
             InlineKeyboardButton("✏️ Modificar Cantidad / Peso", callback_data=f"rec_mod_{pid}"),
             InlineKeyboardButton("🗑️ Quitar Insumo", callback_data=f"rec_del_{pid}"),
         ],
-        [InlineKeyboardButton("🔙 Volver a Lista de Recetas", callback_data="btn_costos_recetas")],
+        [InlineKeyboardButton("🔙 Volver a Lista de Recetas", callback_data="recetas_page_0")],
     ]
 
     await query.message.reply_text("\n".join(lineas), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -782,11 +899,13 @@ async def guardar_nueva_cantidad_receta(update: Update, context: ContextTypes.DE
         return ESTADO_EDITAR_CANTIDAD
 
 
-async def opciones_agregar_insumo_receta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def opciones_agregar_insumo_receta_paginado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    pid = int(query.data.replace("rec_add_", ""))
+    parts = query.data.split("_")
+    pid = int(parts[3])
+    page = int(parts[4])
     context.user_data["edit_rec_pid"] = pid
 
     conn = get_db_connection()
@@ -796,12 +915,35 @@ async def opciones_agregar_insumo_receta(update: Update, context: ContextTypes.D
     cur.close()
     conn.close()
 
+    items_por_pagina = 8
+    total_items = len(insumos)
+    total_paginas = math.ceil(total_items / items_por_pagina) if total_items > 0 else 1
+
+    start_idx = page * items_por_pagina
+    end_idx = start_idx + items_por_pagina
+    insumos_page = insumos[start_idx:end_idx]
+
     keyboard = []
-    for iid, inom, med, cat in insumos:
+    for iid, inom, med, cat in insumos_page:
         keyboard.append([InlineKeyboardButton(f"➕ [{cat}] {inom} ({med})", callback_data=f"sel_add_ins_{pid}_{iid}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"rec_add_page_{pid}_{page - 1}"))
+    if page < total_paginas - 1:
+        nav_row.append(InlineKeyboardButton("Siguiente ➡️", callback_data=f"rec_add_page_{pid}_{page + 1}"))
+
+    if nav_row:
+        keyboard.append(nav_row)
+
     keyboard.append([InlineKeyboardButton("🔙 Volver a la Receta", callback_data=f"ver_receta_{pid}")])
 
-    await query.message.reply_text("Selecciona el insumo o producto que deseas agregar a este ensamble/kit:", reply_markup=InlineKeyboardMarkup(keyboard))
+    msg = f"Selecciona el insumo o producto que deseas agregar a este kit/combo (Pág. {page + 1}/{total_paginas}):"
+    
+    try:
+        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception:
+        await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def pedir_cantidad_agregar_receta(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1704,7 +1846,6 @@ def generar_pdf_valorizacion_y_categorizado_sync():
         Paragraph(f"Generado el: {now_co.strftime('%Y-%m-%d %H:%M:%S')}", sub_style),
     ]
 
-    # Agrupar por Categoría
     categorizados = {}
     total_general_costo = 0.0
 
@@ -1725,7 +1866,6 @@ def generar_pdf_valorizacion_y_categorizado_sync():
         elements.append(Paragraph(f"📂 <b>Categoría: {cat_nom}</b>", cat_header_style))
         
         tabla_data = [["Insumo", "Stock Actual", "Costo U.", "Costo Total Insumo"]]
-        subtotal_cat = 0.0
 
         for row in lista_items:
             tabla_data.append(row)
@@ -1743,7 +1883,6 @@ def generar_pdf_valorizacion_y_categorizado_sync():
         )
         elements.append(t)
 
-    # Resumen Final
     p_total = Paragraph(f"<br/><br/><b>COSTO TOTAL VALORIZADO DE INSUMOS EN BODEGA: {formatear_cop(total_general_costo)}</b>", titulo_style)
     elements.append(p_total)
 
@@ -1993,8 +2132,11 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "📊 <b>Módulo de Balances Financieros</b>\n\nSelecciona el periodo que deseas consultar:"
             await query.message.reply_text(msg, reply_markup=obtener_teclado_balances(), parse_mode="HTML")
 
-        elif data == "btn_costos_recetas":
-            await mostrar_costos_recetas(update, context)
+        elif data.startswith("recetas_page_"):
+            await mostrar_costos_recetas_paginado(update, context)
+
+        elif data.startswith("rec_add_page_"):
+            await opciones_agregar_insumo_receta_paginado(update, context)
 
         elif data.startswith("ver_receta_"):
             await ver_detalle_receta(update, context)
@@ -2007,9 +2149,6 @@ async def manejar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("rec_mod_"):
             await opciones_modificar_cantidad_receta(update, context)
-
-        elif data.startswith("rec_add_"):
-            await opciones_agregar_insumo_receta(update, context)
 
         elif data == "btn_ventas_hoy":
             datos_hoy = ventas_hoy_sync()
@@ -2382,9 +2521,16 @@ conv_add_receta = ConversationHandler(
     fallbacks=[CommandHandler("cancelar", cancelar_conversion)],
 )
 
+conv_crear_combo = ConversationHandler(
+    entry_points=[CallbackQueryHandler(iniciar_crear_combo, pattern="^btn_crear_combo$")],
+    states={ESTADO_CREAR_COMBO_DATOS: [MessageHandler(filters.TEXT & ~filters.COMMAND, guardar_crear_combo)]},
+    fallbacks=[CommandHandler("cancelar", cancelar_conversion)],
+)
+
 ptb_app.add_handler(conv_compras)
 ptb_app.add_handler(conv_mod_receta)
 ptb_app.add_handler(conv_add_receta)
+ptb_app.add_handler(conv_crear_combo)
 ptb_app.add_handler(CallbackQueryHandler(manejar_callback))
 ptb_app.add_handler(CommandHandler("test_notificaciones", probar_notificaciones))
 ptb_app.add_handler(MessageHandler(filters.ALL, procesar_mensaje_texto))
