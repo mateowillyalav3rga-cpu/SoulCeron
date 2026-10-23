@@ -1,3 +1,4 @@
+import html
 import io
 import json
 import logging
@@ -155,9 +156,13 @@ def enviar_documento_api(
         logging.error(f"Error enviando documento API Telegram a {chat_id}: {e}")
 
 
+
+
 def enviar_mensaje_seguro(texto: str, max_length: int = 4000) -> str:
     if len(texto) > max_length:
-        return texto[:max_length] + "\n\n⚠️ <i>(Resultado recortado por longitud)</i>"
+        # Si sobrepasa el límite, elimina etiquetas HTML para evitar errores de sintaxis al recortar
+        texto_limpio = re.sub(r'<[^>]+>', '', texto)
+        return html.escape(texto_limpio[:max_length]) + "\n\n⚠️ <i>(Resultado recortado por longitud)</i>"
     return texto
 
 
