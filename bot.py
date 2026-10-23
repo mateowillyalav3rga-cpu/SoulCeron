@@ -40,7 +40,6 @@ CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")
 ID_ESPOSA = "2059542689"
 ID_ESPOSO = "5197161394"
 
-# Control de desduplicación de mensajes por update_id
 UPDATES_PROCESADOS = set()
 
 # Estados para ConversationHandler
@@ -167,7 +166,33 @@ def formatear_cop(monto):
 
 
 # -------------------------------------------------------------------
-# MENÚ CON BOTONES INTERACTIVOS REORGANIZADO
+# FUNCIÓN CLAVE: RECALCULAR COSTO_COMPRA DEL PRODUCTO SEGÚN SU RECETA
+# -------------------------------------------------------------------
+def recalcular_costo_producto(cur, id_producto: int):
+    """
+    Suma el costo total de los insumos en la tabla 'recetas' 
+    y actualiza la columna 'costo_compra' en la tabla 'productos'.
+    """
+    query_sum = """
+        SELECT COALESCE(SUM(r.cantidad_usada * i.costo_unitario), 0.0)
+        FROM recetas r
+        JOIN insumos i ON r.id_insumo = i.id_insumo
+        WHERE r.id_producto = %s;
+    """
+    cur.execute(query_sum, (id_producto,))
+    nuevo_costo = cur.fetchone()[0]
+
+    query_update = """
+        UPDATE productos
+        SET costo_compra = %s
+        WHERE id_producto = %s;
+    """
+    cur.execute(query_update, (nuevo_costo, id_producto))
+    return nuevo_costo
+
+
+# -------------------------------------------------------------------
+# MENÚ CON BOTONES INTERACTIVOS
 # -------------------------------------------------------------------
 def obtener_teclado_menu():
     keyboard = [
@@ -550,6 +575,12 @@ async def guardar_compra_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"📈 <b>Nuevo Costo U.:</b> <code>{formatear_cop(costo_u)}</code> / {med}"
             )
 
+            # Recalcular automáticamente el costo_compra de todos los productos/recetas que usan este insumo
+            cur.execute("SELECT DISTINCT id_producto FROM recetas WHERE id_insumo = %s;", (ins_id,))
+            prods_afectados = cur.fetchall()
+            for (p_afectado_id,) in prods_afectados:
+                recalcular_costo_producto(cur, p_afectado_id)
+
         conn.commit()
         cur.close()
         conn.close()
@@ -574,7 +605,7 @@ async def cancelar_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # -------------------------------------------------------------------
-# EDITOR INTERACTIVO DE RECETAS / COMBOS CON PAGINACIÓN Y FILTRO (id_categoria != 1)
+# EDITOR INTERACTIVO DE RECETAS / COMBOS CON PAGINACIÓN Y FILTRO
 # -------------------------------------------------------------------
 async def mostrar_costos_recetas_paginado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -619,7 +650,7 @@ async def mostrar_costos_recetas_paginado(update: Update, context: ContextTypes.
         nav_row.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"recetas_page_{page - 1}"))
     if page < total_paginas - 1:
         nav_row.append(InlineKeyboardButton("Siguiente ➡️", callback_data=f"recetas_page_{page + 1}"))
-    
+
     if nav_row:
         keyboard.append(nav_row)
 
@@ -648,7 +679,7 @@ async def iniciar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE
         "📌 <i>Ejemplos:</i>\n"
         "• <code>Kit Navideño Especial, 85000, Kit Navideño</code>\n"
         "• <code>Combo Amor y Amistad #1, 45000, Kit Amor y Amistad</code>\n"
-        "• <code>Caja Mini Donas x12, 32000, Mini Donitas</code>\n\n"
+        "• <code>Mini Chocolate, 2500, Chocolates</code>\n\n"
         "💡 <i>Si la categoría no existe en el sistema, se creará automáticamente en la tabla categorias.</i>"
     )
     await query.message.reply_text(msg, parse_mode="HTML")
@@ -678,7 +709,6 @@ async def guardar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE
     cur = conn.cursor()
 
     try:
-        # Verificar o crear categoría en la tabla 'categorias'
         cur.execute("SELECT id_categoria FROM categorias WHERE LOWER(nombre) = LOWER(%s);", (cat_nombre,))
         res_cat = cur.fetchone()
         if not res_cat:
@@ -687,7 +717,6 @@ async def guardar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             id_cat = res_cat[0]
 
-        # Crear el producto asignando su id_categoria correspondiente
         cur.execute("""
             INSERT INTO productos (nombre, stock_actual, costo_compra, precio_venta, id_categoria)
             VALUES (%s, 0, 0.0, %s, %s)
@@ -704,7 +733,7 @@ async def guardar_crear_combo(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"🎁 <b>Nombre:</b> {nom_combo}\n"
             f"🏷️ <b>Categoría:</b> {cat_nombre} (ID: {id_cat})\n"
             f"🏷️ <b>Precio de Venta:</b> <code>{formatear_cop(precio_v)}</code>\n\n"
-            f"💡 <i>Ahora puedes seleccionarlo en 'Costos & Recetas' para agregarle sus empaques o insumos.</i>"
+            f"💡 <i>Ahora selecciona la opción de abajo para agregar sus insumos y componentes a la receta.</i>"
         )
         await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -731,8 +760,9 @@ async def ver_detalle_receta(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = get_db_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT nombre, precio_venta FROM productos WHERE id_producto = %s;", (pid,))
-    pnom, precio = cur.fetchone()
+    cur.execute("SELECT nombre, precio_venta, costo_compra FROM productos WHERE id_producto = %s;", (pid,))
+    res_p = cur.fetchone()
+    pnom, precio, costo_compra_prod = res_p[0], float(res_p[1]), float(res_p[2])
 
     cur.execute("""
         SELECT r.id_insumo, i.nombre, r.cantidad_usada, i.unidad_medida, i.costo_unitario, (r.cantidad_usada * i.costo_unitario) as costo_parcial
@@ -746,8 +776,7 @@ async def ver_detalle_receta(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.close()
 
     costo_total = sum(float(row[5]) for row in insumos_receta) if insumos_receta else 0.0
-    precio_fl = float(precio)
-    ganancia = precio_fl - costo_total
+    ganancia = precio - costo_total
 
     lineas = [f"🍫 <b>Producto / Kit / Combo:</b> {pnom}\n" + "─"*30]
     if not insumos_receta:
@@ -757,8 +786,8 @@ async def ver_detalle_receta(update: Update, context: ContextTypes.DEFAULT_TYPE)
             lineas.append(f"• <b>{inom}:</b> {float(cant):,.2f} {med} (<code>{formatear_cop(c_parcial)}</code>)")
 
     lineas.append("─"*30)
-    lineas.append(f"💵 <b>Costo Total Ensamble:</b> <code>{formatear_cop(costo_total)}</code>")
-    lineas.append(f"🏷️ <b>Precio de Venta:</b> <code>{formatear_cop(precio_fl)}</code>")
+    lineas.append(f"💵 <b>Costo Total Receta (Actualizado):</b> <code>{formatear_cop(costo_total)}</code>")
+    lineas.append(f"🏷️ <b>Precio de Venta:</b> <code>{formatear_cop(precio)}</code>")
     lineas.append(f"📈 <b>Ganancia Estimada:</b> <code>{formatear_cop(ganancia)}</code>")
 
     keyboard = [
@@ -812,11 +841,15 @@ async def ejecutar_quitar_insumo_receta(update: Update, context: ContextTypes.DE
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM recetas WHERE id_producto = %s AND id_insumo = %s;", (pid, iid))
+
+    # Recalcular automáticamente el costo_compra en la tabla productos
+    nuevo_costo = recalcular_costo_producto(cur, pid)
+
     conn.commit()
     cur.close()
     conn.close()
 
-    await query.message.reply_text("✅ Insumo/Producto eliminado de la receta exitosamente.")
+    await query.message.reply_text(f"✅ Insumo/Producto eliminado de la receta. Nuevo costo de producto: <code>{formatear_cop(nuevo_costo)}</code>", parse_mode="HTML")
     query.data = f"ver_receta_{pid}"
     await ver_detalle_receta(update, context)
 
@@ -881,11 +914,15 @@ async def guardar_nueva_cantidad_receta(update: Update, context: ContextTypes.DE
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("UPDATE recetas SET cantidad_usada = %s WHERE id_producto = %s AND id_insumo = %s;", (nueva_cant, pid, iid))
+
+        # Recalcular automáticamente el costo_compra en la tabla productos
+        nuevo_costo = recalcular_costo_producto(cur, pid)
+
         conn.commit()
         cur.close()
         conn.close()
 
-        await update.message.reply_text("✅ Cantidad actualizada con éxito.")
+        await update.message.reply_text(f"✅ Cantidad actualizada con éxito. Nuevo costo de compra del producto: <code>{formatear_cop(nuevo_costo)}</code>", parse_mode="HTML")
         return ConversationHandler.END
     except ValueError:
         await update.message.reply_text("❌ Ingresa un número válido para la cantidad.")
@@ -974,11 +1011,15 @@ async def guardar_agregar_insumo_receta(update: Update, context: ContextTypes.DE
             VALUES (%s, %s, %s)
             ON CONFLICT (id_producto, id_insumo) DO UPDATE SET cantidad_usada = EXCLUDED.cantidad_usada;
         """, (pid, iid, cant_usada))
+
+        # Recalcular automáticamente el costo_compra en la tabla productos
+        nuevo_costo = recalcular_costo_producto(cur, pid)
+
         conn.commit()
         cur.close()
         conn.close()
 
-        await update.message.reply_text("✅ Componente agregado a la receta exitosamente.")
+        await update.message.reply_text(f"✅ Componente agregado a la receta exitosamente. Nuevo costo de compra del producto: <code>{formatear_cop(nuevo_costo)}</code>", parse_mode="HTML")
         return ConversationHandler.END
     except ValueError:
         await update.message.reply_text("❌ Ingresa un número válido.")
@@ -997,10 +1038,10 @@ async def registrar_venta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ <b>Formato de venta incorrecto.</b> Usa:\n\n"
             "<pre>\n"
             "v\n"
-            "Nombre Cliente\n"
+            "Cliente Nombre\n"
             "contado\n"
-            "Producto, Cantidad\n"
-            "Otro Producto, 2\n"
+            "Combo Chocolates x5, 1\n"
+            "Labial Mágico, 2\n"
             "</pre>",
             parse_mode="HTML",
         )
@@ -2353,7 +2394,7 @@ async def procesar_mensaje_texto(update: Update, context: ContextTypes.DEFAULT_T
 # -------------------------------------------------------------------
 def mantener_vivo():
     try:
-        urllib.request.urlopen("https://soulceron.onrender.com/", timeout=5)
+        urllib.request.urlopen("https://soulceron-12fm.onrender.com/", timeout=5)
         logging.info("Ping de mantenimiento exitoso a Render.")
     except Exception as e:
         logging.error(f"Error en ping de mantenimiento: {e}")
@@ -2464,9 +2505,8 @@ def tarea_cierre_mensual_automatico():
             logging.error(f"Error en reporte mensual automático: {e}")
 
 
-# Inicialización del Scheduler
+# Scheduler
 scheduler = BackgroundScheduler(timezone=COLOMBIA_TZ)
-scheduler.add_job(mantener_vivo, "interval", minutes=10)
 scheduler.add_job(
     tarea_saludo_manana, "cron", hour=7, minute=0, timezone=COLOMBIA_TZ
 )
